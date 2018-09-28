@@ -16,10 +16,13 @@
 
 package com.android.internal.car;
 
+import android.app.admin.DevicePolicyManager;
+import android.car.user.CarUserManagerHelper;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.UserInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.Parcel;
@@ -27,19 +30,22 @@ import android.os.RemoteException;
 import android.os.UserHandle;
 import android.util.Slog;
 
-import com.android.server.SystemService;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.car.ICarServiceHelper;
+import com.android.server.SystemService;
 
 /**
  * System service side companion service for CarService.
  * Starts car service and provide necessary API for CarService. Only for car product.
  */
 public class CarServiceHelperService extends SystemService {
+    // Place holder for user name of the first user created.
     private static final String TAG = "CarServiceHelper";
     private static final String CAR_SERVICE_INTERFACE = "android.car.ICar";
     private final ICarServiceHelperImpl mHelper = new ICarServiceHelperImpl();
     private final Context mContext;
     private IBinder mCarService;
+    private CarUserManagerHelper mCarUserManagerHelper;
     private final ServiceConnection mCarServiceConnection = new ServiceConnection() {
 
         @Override
@@ -70,6 +76,31 @@ public class CarServiceHelperService extends SystemService {
     public CarServiceHelperService(Context context) {
         super(context);
         mContext = context;
+        mCarUserManagerHelper = new CarUserManagerHelper(context);
+    }
+
+    @Override
+    public void onBootPhase(int phase) {
+        // We are starting up another user before PHASE_BOOT_COMPLETE. Services should
+        // still check for User 0's boot complete intent.
+        if (phase == SystemService.PHASE_THIRD_PARTY_APPS_CAN_START) {
+            DevicePolicyManager devicePolicyManager =
+                    mContext.getSystemService(DevicePolicyManager.class);
+            if (devicePolicyManager != null && devicePolicyManager.getUserProvisioningState()
+                    != DevicePolicyManager.STATE_USER_UNMANAGED) {
+                return;
+            }
+            if (mCarUserManagerHelper.getAllUsers().size() == 0) {
+                // On very first boot, create an admin user and switch to that user.
+                UserInfo admin = mCarUserManagerHelper.createNewAdminUser(
+                        CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME);
+                mCarUserManagerHelper.switchToUser(admin);
+                mCarUserManagerHelper.setLastActiveUser(
+                        admin.id, /* skipGlobalSettings= */ false);
+            } else {
+                mCarUserManagerHelper.switchToUserId(mCarUserManagerHelper.getInitialUser());
+            }
+        }
     }
 
     @Override
@@ -84,6 +115,11 @@ public class CarServiceHelperService extends SystemService {
         System.loadLibrary("car-framework-service-jni");
     }
 
+    @VisibleForTesting
+    void setCarUserManagerHelper(CarUserManagerHelper userManagerHelper) {
+        mCarUserManagerHelper = userManagerHelper;
+    }
+
     private void handleCarServiceCrash() {
         //TODO define recovery bahavior
     }
@@ -91,10 +127,8 @@ public class CarServiceHelperService extends SystemService {
     private static native int nativeForceSuspend(int timeoutMs);
 
     private class ICarServiceHelperImpl extends ICarServiceHelper.Stub {
-       /**
+        /**
          * Force device to suspend
-         *
-         * @param timeoutMs
          */
         @Override // Binder call
         public int forceSuspend(int timeoutMs) {
