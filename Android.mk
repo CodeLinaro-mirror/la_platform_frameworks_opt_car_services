@@ -7,8 +7,12 @@ LOCAL_SRC_FILES := $(call all-java-files-under, src) \
 LOCAL_JNI_SHARED_LIBRARIES := libcar-framework-service-jni
 LOCAL_REQUIRED_MODULES := libcar-framework-service-jni
 
-LOCAL_JAVA_LIBRARIES += services \
+LOCAL_JAVA_LIBRARIES += \
+    services \
     android.car
+
+LOCAL_STATIC_JAVA_LIBRARIES += \
+    android.car.user
 
 LOCAL_MODULE := car-frameworks-service
 
