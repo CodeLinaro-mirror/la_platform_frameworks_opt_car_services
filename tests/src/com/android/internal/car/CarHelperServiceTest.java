@@ -22,15 +22,21 @@ import static org.mockito.Mockito.verify;
 import android.car.userlib.CarUserManagerHelper;
 import android.content.Context;
 import android.content.pm.UserInfo;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.runner.AndroidJUnit4;
+
+import android.os.SystemProperties;
 import com.android.server.SystemService;
-import java.util.ArrayList;
-import java.util.List;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Matchers;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * This class contains unit tests for the {@link CarServiceHelperService}.
@@ -43,6 +49,7 @@ import org.mockito.MockitoAnnotations;
  */
 @RunWith(AndroidJUnit4.class)
 public class CarHelperServiceTest {
+    private static final String DEFAULT_NAME = "Driver";
     private CarServiceHelperService mCarServiceHelperService;
     @Mock
     private Context mMockContext;
@@ -61,8 +68,9 @@ public class CarHelperServiceTest {
         MockitoAnnotations.initMocks(this);
         doReturn(mApplicationContext).when(mMockContext).getApplicationContext();
 
-        mCarServiceHelperService = new CarServiceHelperService(mMockContext);
-        mCarServiceHelperService.setCarUserManagerHelper(mCarUserManagerHelper);
+        setDefaultGuestFlag(false);
+
+        mCarServiceHelperService = new CarServiceHelperService(mMockContext, mCarUserManagerHelper);
     }
 
     /**
@@ -71,13 +79,13 @@ public class CarHelperServiceTest {
      */
     @Test
     public void testStartsSecondaryAdminUserOnFirstRun() {
-        UserInfo admin = mockAdmin(/* adminId= */ 10);
+        UserInfo admin = mockAdminWithDefaultName(/* adminId= */ 10);
 
         doReturn(new ArrayList<>()).when(mCarUserManagerHelper).getAllUsers();
         mCarServiceHelperService.onBootPhase(SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
 
-        verify(mCarUserManagerHelper).createNewAdminUser(CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME);
-        verify(mCarUserManagerHelper).switchToUser(admin);
+        verify(mCarUserManagerHelper).createNewAdminUser();
+        verify(mCarUserManagerHelper).switchToUserId(admin.id);
     }
 
     /**
@@ -86,7 +94,7 @@ public class CarHelperServiceTest {
      */
     @Test
     public void testUpdateLastActiveUserOnFirstRun() {
-        UserInfo admin = mockAdmin(/* adminId= */ 10);
+        UserInfo admin = mockAdminWithDefaultName(/* adminId= */ 10);
 
         mCarServiceHelperService.onBootPhase(SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
 
@@ -102,11 +110,11 @@ public class CarHelperServiceTest {
 
         int adminUserId = 10;
         UserInfo admin =
-            new UserInfo(adminUserId, CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME, UserInfo.FLAG_ADMIN);
+            new UserInfo(adminUserId, DEFAULT_NAME, UserInfo.FLAG_ADMIN);
 
         int secUserId = 11;
         UserInfo secUser =
-            new UserInfo(secUserId, CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME, UserInfo.FLAG_ADMIN);
+            new UserInfo(secUserId, DEFAULT_NAME, UserInfo.FLAG_ADMIN);
 
         users.add(admin);
         users.add(secUser);
@@ -119,11 +127,41 @@ public class CarHelperServiceTest {
         verify(mCarUserManagerHelper).switchToUserId(secUserId);
     }
 
-    private UserInfo mockAdmin(int adminId) {
-        UserInfo admin =
-                new UserInfo(adminId, CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME, UserInfo.FLAG_ADMIN);
-        doReturn(admin).when(mCarUserManagerHelper)
-                .createNewAdminUser(CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME);
+    /**
+     * Test that the {@link CarServiceHelperService} starts into a Guest user when the
+     * SystemProperty "android.car.systemuser.defaultguest" is set.
+     */
+    @Test
+    public void testDefaultGuestFlag() {
+        setDefaultGuestFlag(true);
+
+        mCarServiceHelperService.onBootPhase(SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
+
+        verify(mCarUserManagerHelper).startGuestSession(Matchers.anyString());
+    }
+
+    /**
+     * Test that the {@link CarServiceHelperService} creates an admin when the SystemProperty
+     * "android.car.systemuser.defaultguest" is set.
+     */
+    @Test
+    public void testDefaultGuestFlagHasAdmin() {
+        List<UserInfo> emptyUserList = new ArrayList<>();
+        doReturn(emptyUserList).when(mCarUserManagerHelper).getAllAdminUsers();
+        setDefaultGuestFlag(true);
+
+        mCarServiceHelperService.onBootPhase(SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
+
+        verify(mCarUserManagerHelper).createNewAdminUser();
+    }
+
+    private UserInfo mockAdminWithDefaultName(int adminId) {
+        UserInfo admin = new UserInfo(adminId, DEFAULT_NAME, UserInfo.FLAG_ADMIN);
+        doReturn(admin).when(mCarUserManagerHelper).createNewAdminUser();
         return admin;
+    }
+
+    private void setDefaultGuestFlag(boolean enabled) {
+        SystemProperties.set("android.car.systemuser.defaultguest", Boolean.toString(enabled));
     }
 }

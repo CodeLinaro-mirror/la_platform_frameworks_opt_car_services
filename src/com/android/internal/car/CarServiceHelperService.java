@@ -27,6 +27,7 @@ import android.os.Binder;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.RemoteException;
+import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.util.Slog;
 import com.android.internal.annotations.VisibleForTesting;
@@ -44,7 +45,7 @@ public class CarServiceHelperService extends SystemService {
     private final ICarServiceHelperImpl mHelper = new ICarServiceHelperImpl();
     private final Context mContext;
     private IBinder mCarService;
-    private CarUserManagerHelper mCarUserManagerHelper;
+    private final CarUserManagerHelper mCarUserManagerHelper;
     private final ServiceConnection mCarServiceConnection = new ServiceConnection() {
 
         @Override
@@ -73,9 +74,14 @@ public class CarServiceHelperService extends SystemService {
     };
 
     public CarServiceHelperService(Context context) {
+        this(context, new CarUserManagerHelper(context));
+    }
+
+    @VisibleForTesting
+    CarServiceHelperService(Context context, CarUserManagerHelper carUserManagerHelper) {
         super(context);
         mContext = context;
-        mCarUserManagerHelper = new CarUserManagerHelper(context);
+        mCarUserManagerHelper = carUserManagerHelper;
     }
 
     @Override
@@ -89,14 +95,25 @@ public class CarServiceHelperService extends SystemService {
                     != DevicePolicyManager.STATE_USER_UNMANAGED) {
                 return;
             }
-            if (mCarUserManagerHelper.getAllUsers().size() == 0) {
-                // On very first boot, create an admin user and switch to that user.
-                UserInfo admin = mCarUserManagerHelper.createNewAdminUser(
-                        CarUserManagerHelper.DEFAULT_FIRST_ADMIN_NAME);
-                mCarUserManagerHelper.switchToUserId(admin.id);
-                mCarUserManagerHelper.setLastActiveUser(admin.id);
+
+            if (SystemProperties.getBoolean("android.car.systemuser.defaultguest", false)) {
+                // Ensure we switch to the guest user by default
+                // TODO(b/122852856): Localize this string
+                mCarUserManagerHelper.startGuestSession("Guest");
+
+                // Ensure there is an admin user on the device
+                if (mCarUserManagerHelper.getAllAdminUsers().isEmpty()) {
+                    UserInfo admin = mCarUserManagerHelper.createNewAdminUser();
+                }
             } else {
-                mCarUserManagerHelper.switchToUserId(mCarUserManagerHelper.getInitialUser());
+                if (mCarUserManagerHelper.getAllUsers().size() == 0) {
+                    // On very first boot, create an admin user and switch to that user.
+                    UserInfo admin = mCarUserManagerHelper.createNewAdminUser();
+                    mCarUserManagerHelper.switchToUserId(admin.id);
+                    mCarUserManagerHelper.setLastActiveUser(admin.id);
+                } else {
+                    mCarUserManagerHelper.switchToUserId(mCarUserManagerHelper.getInitialUser());
+                }
             }
         }
     }
@@ -111,11 +128,6 @@ public class CarServiceHelperService extends SystemService {
             Slog.wtf(TAG, "cannot start car service");
         }
         System.loadLibrary("car-framework-service-jni");
-    }
-
-    @VisibleForTesting
-    void setCarUserManagerHelper(CarUserManagerHelper userManagerHelper) {
-        mCarUserManagerHelper = userManagerHelper;
     }
 
     private void handleCarServiceCrash() {
