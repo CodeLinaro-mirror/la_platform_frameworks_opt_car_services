@@ -18,19 +18,27 @@ package com.android.internal.car;
 
 import static com.android.internal.util.function.pooled.PooledLambda.obtainMessage;
 
+import static android.car.userlib.UserHelper.safeName;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.UserIdInt;
+import android.automotive.watchdog.ICarWatchdogClient;
+import android.automotive.watchdog.ICarWatchdogMonitor;
 import android.app.ActivityManager;
 import android.app.IActivityManager;
 import android.app.admin.DevicePolicyManager;
 import android.car.userlib.CarUserManagerHelper;
+import android.car.userlib.UserHalHelper;
+import android.car.watchdoglib.CarWatchdogDaemonHelper;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.UserInfo;
 import android.graphics.Bitmap;
+import android.hardware.automotive.vehicle.V2_0.InitialUserInfoRequestType;
+import android.hardware.automotive.vehicle.V2_0.InitialUserInfoResponseAction;
 import android.hidl.manager.V1_0.IServiceManager;
 import android.os.Binder;
 import android.os.Bundle;
@@ -57,8 +65,6 @@ import com.android.internal.car.ExternalConstants.CarUserManagerConstants;
 import com.android.internal.car.ExternalConstants.CarUserServiceConstants;
 import com.android.internal.car.ExternalConstants.ICarConstants;
 import com.android.internal.car.ExternalConstants.UserHalServiceConstants;
-import com.android.internal.car.ExternalConstants.VHalResponseActionConstants;
-import com.android.internal.car.ExternalConstants.VHalUserFlagsConstants;
 import com.android.internal.os.IResultReceiver;
 import com.android.internal.util.UserIcons;
 import com.android.server.SystemService;
@@ -68,6 +74,11 @@ import com.android.server.am.ActivityManagerService;
 import com.android.server.utils.TimingsTraceAndSlog;
 import com.android.server.wm.CarLaunchParamsModifier;
 
+import java.io.File;
+import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -75,6 +86,8 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * System service side companion service for CarService.
@@ -86,15 +99,20 @@ public class CarServiceHelperService extends SystemService {
     private static final boolean DBG = true;
     private static final boolean VERBOSE = true;
 
-    // Typically there are ~2-5 ops while system and non-system users are starting.
-    private final int NUMBER_PENDING_OPERATIONS = 5;
-
     private static final String PROP_RESTART_RUNTIME = "ro.car.recovery.restart_runtime.enabled";
 
     private static final List<String> CAR_HAL_INTERFACES_OF_INTEREST = Arrays.asList(
             "android.hardware.automotive.vehicle@2.0::IVehicle",
             "android.hardware.automotive.audiocontrol@1.0::IAudioControl"
     );
+
+    // Message ID representing HAL timeout handling.
+    private static final int WHAT_HAL_TIMEOUT = 1;
+    // Message ID representing post-processing of process dumping.
+    private static final int WHAT_POST_PROCESS_DUMPING = 2;
+
+    // Typically there are ~2-5 ops while system and non-system users are starting.
+    private final int NUMBER_PENDING_OPERATIONS = 5;
 
     @GuardedBy("mLock")
     private int mLastSwitchedUser = UserHandle.USER_NULL;
@@ -121,6 +139,8 @@ public class CarServiceHelperService extends SystemService {
     // Handler is currently only used for handleHalTimedout(), which is removed once received.
     private final Handler mHandler = new Handler(Looper.getMainLooper());
 
+    private final ProcessTerminator mProcessTerminator = new ProcessTerminator();
+
     @GuardedBy("mLock")
     private boolean mInitialized;
 
@@ -133,6 +153,15 @@ public class CarServiceHelperService extends SystemService {
     // parcelables representing the operation, then pass them to setCarServiceHelper
     @GuardedBy("mLock")
     private ArrayList<Runnable> mPendingOperations;
+
+    private final CarWatchdogDaemonHelper mCarWatchdogDaemonHelper;
+    private final ICarWatchdogMonitorImpl mCarWatchdogMonitor = new ICarWatchdogMonitorImpl(this);
+    private final CarWatchdogDaemonHelper.OnConnectionChangeListener mConnectionListener =
+            (connected) -> {
+                if (connected) {
+                    registerMonitorToWatchdogDaemon();
+                }
+            };
 
     private final ServiceConnection mCarServiceConnection = new ServiceConnection() {
         @Override
@@ -155,6 +184,7 @@ public class CarServiceHelperService extends SystemService {
                 UserManager.get(context),
                 ActivityManager.getService(),
                 new CarLaunchParamsModifier(context),
+                new CarWatchdogDaemonHelper(),
                 context.getString(com.android.internal.R.string.owner_name),
                 CarProperties.user_hal_enabled().orElse(false),
                 CarProperties.user_hal_timeout().orElse(5_000)
@@ -168,6 +198,7 @@ public class CarServiceHelperService extends SystemService {
             UserManager userManager,
             IActivityManager activityManager,
             CarLaunchParamsModifier carLaunchParamsModifier,
+            CarWatchdogDaemonHelper carWatchdogDaemonHelper,
             String defaultUserName,
             boolean halEnabled,
             int halTimeoutMs) {
@@ -177,6 +208,7 @@ public class CarServiceHelperService extends SystemService {
         mUserManager = userManager;
         mActivityManager = activityManager;
         mCarLaunchParamsModifier = carLaunchParamsModifier;
+        mCarWatchdogDaemonHelper = carWatchdogDaemonHelper;
         mDefaultUserName = defaultUserName;
         boolean halValidUserHalSettings = false;
         if (halEnabled) {
@@ -230,6 +262,8 @@ public class CarServiceHelperService extends SystemService {
 
     @Override
     public void onStart() {
+        mCarWatchdogDaemonHelper.addOnConnectionChangeListener(mConnectionListener);
+        mCarWatchdogDaemonHelper.connect();
         Intent intent = new Intent();
         intent.setPackage("com.android.car");
         intent.setAction(ICarConstants.CAR_SERVICE_INTERFACE);
@@ -439,16 +473,14 @@ public class CarServiceHelperService extends SystemService {
     }
 
     private void setupAndStartUsersUsingHal() {
-        mHandler.sendMessageDelayed(obtainMessage(CarServiceHelperService::handleHalTimedout, this),
-                mHalTimeoutMs);
+        mHandler.sendMessageDelayed(obtainMessage(CarServiceHelperService::handleHalTimedout, this)
+                .setWhat(WHAT_HAL_TIMEOUT), mHalTimeoutMs);
 
-        // TODO(b/150419360): proper request type (cold boot, first boot, OTA, etc...
-        int requestType = 3; // COLD BOOT
         // TODO(b/150413515): get rid of receiver once returned?
         IResultReceiver receiver = new IResultReceiver.Stub() {
             @Override
             public void send(int resultCode, Bundle resultData) {
-                mHandler.removeMessages(0);
+                mHandler.removeMessages(WHAT_HAL_TIMEOUT);
                 // TODO(b/150222501): log how long it took to receive the response
                 // TODO(b/150413515): print resultData as well on 2 logging calls below
                 synchronized (mLock) {
@@ -478,18 +510,18 @@ public class CarServiceHelperService extends SystemService {
                 }
 
                 int action = resultData.getInt(CarUserServiceConstants.BUNDLE_INITIAL_INFO_ACTION,
-                        VHalResponseActionConstants.DEFAULT);
+                        InitialUserInfoResponseAction.DEFAULT);
 
                 switch (action) {
-                    case VHalResponseActionConstants.DEFAULT:
+                    case InitialUserInfoResponseAction.DEFAULT:
                         Slog.i(TAG, "User HAL returned DEFAULT behavior");
                         setupAndStartUsersDirectly();
                         return;
-                    case VHalResponseActionConstants.SWITCH:
+                    case InitialUserInfoResponseAction.SWITCH:
                         int userId = resultData.getInt(CarUserServiceConstants.BUNDLE_USER_ID);
                         startUserByHalRequest(userId);
                         return;
-                    case VHalResponseActionConstants.CREATE:
+                    case InitialUserInfoResponseAction.CREATE:
                         String name = resultData
                                 .getString(CarUserServiceConstants.BUNDLE_USER_NAME);
                         int flags = resultData.getInt(CarUserServiceConstants.BUNDLE_USER_FLAGS);
@@ -501,8 +533,19 @@ public class CarServiceHelperService extends SystemService {
                 fallbackToDefaultInitialUserBehavior();
             }
         };
+        int initialUserInfoRequestType = getInitialUserInfoRequestType();
+        sendOrQueueGetInitialUserInfo(initialUserInfoRequestType, receiver);
+    }
 
-        sendOrQueueGetInitialUserInfo(requestType, receiver);
+    // TODO(b/150419360): add unit test
+    private int getInitialUserInfoRequestType() {
+        if (!hasInitialSecondaryUser()) {
+            return InitialUserInfoRequestType.FIRST_BOOT;
+        }
+        if (mContext.getPackageManager().isDeviceUpgrading()) {
+            return InitialUserInfoRequestType.FIRST_BOOT_AFTER_OTA;
+        }
+        return InitialUserInfoRequestType.COLD_BOOT;
     }
 
     private void startUserByHalRequest(@UserIdInt int userId) {
@@ -527,23 +570,23 @@ public class CarServiceHelperService extends SystemService {
 
     private void createUserByHalRequest(@Nullable String name, int halFlags) {
         String friendlyName = "user with name '" + safeName(name) + "' and flags "
-                + VHalUserFlagsConstants.toString(halFlags);
+                + UserHalHelper.userFlagsToString(halFlags);
 
         Slog.i(TAG, "HAL request creation of " + friendlyName);
 
-        if (VHalUserFlagsConstants.isSystem(halFlags)) {
+        if (UserHalHelper.isSystem(halFlags)) {
             Slog.w(TAG, "Cannot create system user");
             fallbackToDefaultInitialUserBehavior();
             return;
         }
 
-        if (VHalUserFlagsConstants.isAdmin(halFlags)) {
+        if (UserHalHelper.isAdmin(halFlags)) {
             boolean validAdmin = true;
-            if (VHalUserFlagsConstants.isGuest(halFlags)) {
+            if (UserHalHelper.isGuest(halFlags)) {
                 Slog.w(TAG, "Cannot create guest admin");
                 validAdmin = false;
             }
-            if (VHalUserFlagsConstants.isEphemeral(halFlags)) {
+            if (UserHalHelper.isEphemeral(halFlags)) {
                 Slog.w(TAG, "Cannot create ephemeral admin");
                 validAdmin = false;
             }
@@ -553,10 +596,10 @@ public class CarServiceHelperService extends SystemService {
             }
         }
 
-        String type = VHalUserFlagsConstants.isGuest(halFlags) ? UserManager.USER_TYPE_FULL_GUEST
+        String type = UserHalHelper.isGuest(halFlags) ? UserManager.USER_TYPE_FULL_GUEST
                 : UserManager.USER_TYPE_FULL_SECONDARY;
 
-        int flags = VHalUserFlagsConstants.toUserInfoFlags(halFlags);
+        int flags = UserHalHelper.toUserInfoFlags(halFlags);
         if (DBG) Slog.d(TAG, "new user: type=" + type + ", flags=" + UserInfo.flagsToString(flags));
 
         // TODO(b/150413515): decide what to if HAL requested a non-ephemeral guest but framework
@@ -666,7 +709,6 @@ public class CarServiceHelperService extends SystemService {
     }
 
     private void managePreCreatedUsers() {
-
         // First gets how many pre-createad users are defined by the OEM
         int numberRequestedGuests = CarProperties.number_pre_created_guests().orElse(0);
         int numberRequestedUsers = CarProperties.number_pre_created_users().orElse(0);
@@ -781,17 +823,34 @@ public class CarServiceHelperService extends SystemService {
         // NOTE: we want to get rid of UserManagerHelper, so let's call UserManager directly
         String userType =
                 isGuest ? UserManager.USER_TYPE_FULL_GUEST : UserManager.USER_TYPE_FULL_SECONDARY;
-        UserInfo user = mUserManager.preCreateUser(userType);
+        UserInfo user = null;
         try {
+            user = mUserManager.preCreateUser(userType);
             if (user == null) {
-                // Couldn't create user, most likely because there are too many.
-                Slog.w(TAG, "couldn't " + traceMsg);
-                return null;
+                logPrecreationFailure(traceMsg, /* cause= */ null);
             }
+        } catch (Exception e) {
+            logPrecreationFailure(traceMsg, e);
         } finally {
             t.traceEnd();
         }
         return user;
+    }
+
+    /**
+     * Logs proper message when user pre-creation fails (most likely because there are too many).
+     */
+    private void logPrecreationFailure(@NonNull String operation, @Nullable Exception cause) {
+        int maxNumberUsers = UserManager.getMaxSupportedUsers();
+        int currentNumberUsers = mUserManager.getUserCount();
+        StringBuilder message = new StringBuilder(operation.length() + 100)
+                .append(operation).append(" failed. Number users: ").append(currentNumberUsers)
+                .append(" Max: ").append(maxNumberUsers);
+        if (cause == null) {
+            Slog.w(TAG, message.toString());
+        } else {
+            Slog.w(TAG, message.toString(), cause);
+        }
     }
 
     private void notifyAllUnlockedUsers() {
@@ -1000,16 +1059,25 @@ public class CarServiceHelperService extends SystemService {
         }
     }
 
-    /**
-     * Gets a PII-safe representation of the name.
-     */
-    @Nullable
-    private static String safeName(@Nullable String name) {
-        // TODO(b/150419600): move to helper / add unit test
-        return name == null ? name : name.length() + "_chars";
+    private void handleClientNotResponding(int pid) {
+        mProcessTerminator.requestTerminateProcess(pid);
     }
 
+    private void registerMonitorToWatchdogDaemon() {
+        try {
+            mCarWatchdogDaemonHelper.registerMonitor(mCarWatchdogMonitor);
+        } catch (RemoteException | IllegalArgumentException | IllegalStateException e) {
+            Slog.w(TAG, "Cannot register to car watchdog daemon: " + e);
+        }
+    }
 
+    private void reportMonitorResultToWatchdogDaemon(int pid) {
+        try {
+            mCarWatchdogDaemonHelper.tellDumpFinished(mCarWatchdogMonitor, pid);
+        } catch (RemoteException | IllegalArgumentException | IllegalStateException e) {
+            Slog.w(TAG, "Cannot report monitor result to car watchdog daemon: " + e);
+        }
+    }
 
     private static native int nativeForceSuspend(int timeoutMs);
 
@@ -1038,6 +1106,91 @@ public class CarServiceHelperService extends SystemService {
         @Override
         public void setPassengerDisplays(int[] displayIdsForPassenger) {
             mCarLaunchParamsModifier.setPassengerDisplays(displayIdsForPassenger);
+        }
+    }
+
+    private class ICarWatchdogMonitorImpl extends ICarWatchdogMonitor.Stub {
+        private final WeakReference<CarServiceHelperService> mService;
+
+        private ICarWatchdogMonitorImpl(CarServiceHelperService service) {
+            mService = new WeakReference<>(service);
+        }
+
+        @Override
+        public void onClientNotResponding(ICarWatchdogClient client, int pid) {
+            CarServiceHelperService service = mService.get();
+            if (service == null) {
+                return;
+            }
+            service.handleClientNotResponding(pid);
+        }
+    }
+
+    private final class ProcessTerminator {
+        private final Object mProcessLock = new Object();
+        private ExecutorService mExecutor;
+        @GuardedBy("mProcessLock")
+        private int mQueuedTask;
+
+        public void requestTerminateProcess(int pid) {
+            synchronized (mProcessLock) {
+                // If there is a running thread, we re-use it instead of starting a new thread.
+                if (mExecutor == null) {
+                    mExecutor = Executors.newSingleThreadExecutor();
+                }
+                mQueuedTask++;
+            }
+            mExecutor.execute(() -> {
+                dumpAndKillProcess(pid);
+                // mExecutor will be stopped from the main thread, if there is no queued task.
+                mHandler.sendMessage(obtainMessage(ProcessTerminator::postProcessing, this)
+                        .setWhat(WHAT_POST_PROCESS_DUMPING));
+            });
+        }
+
+        private void postProcessing() {
+            synchronized (mProcessLock) {
+                mQueuedTask--;
+                if (mQueuedTask == 0) {
+                    mExecutor.shutdown();
+                    mExecutor = null;
+                }
+            }
+        }
+
+        private void dumpAndKillProcess(int pid) {
+            if (DBG) {
+                Slog.d(TAG, "Dumping and killing process(pid: " + pid + ")");
+            }
+            ArrayList<Integer> javaPids = new ArrayList<>(1);
+            ArrayList<Integer> nativePids = new ArrayList<>();
+            try {
+                if (isJavaApp(pid)) {
+                    javaPids.add(pid);
+                } else {
+                    nativePids.add(pid);
+                }
+            } catch (IOException e) {
+                Slog.w(TAG, "Cannot get process information: " + e);
+                return;
+            }
+            nativePids.addAll(getInterestingNativePids());
+            long startDumpTime = SystemClock.uptimeMillis();
+            ActivityManagerService.dumpStackTraces(javaPids, null, null, nativePids, null);
+            if (DBG) {
+                Slog.d(TAG, "Dumping process took " +
+                        (SystemClock.uptimeMillis() - startDumpTime) + "ms");
+            }
+            Process.killProcess(pid);
+            reportMonitorResultToWatchdogDaemon(pid);
+        }
+
+        private boolean isJavaApp(int pid) throws IOException {
+            Path exePath = new File("/proc/" + pid + "/exe").toPath();
+            String target = Files.readSymbolicLink(exePath).toString();
+            // Zygote's target exe is also /system/bin/app_process32 or /system/bin/app_process64.
+            // But, we can be very sure that Zygote will not be the client of car watchdog daemon.
+            return target == "/system/bin/app_process32" || target == "/system/bin/app_process64";
         }
     }
 }
