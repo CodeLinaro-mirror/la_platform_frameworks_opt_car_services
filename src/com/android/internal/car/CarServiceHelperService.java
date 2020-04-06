@@ -16,10 +16,10 @@
 
 package com.android.internal.car;
 
+import static com.android.internal.util.function.pooled.PooledLambda.obtainMessage;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.annotation.UserIdInt;
 import android.app.ActivityManager;
 import android.app.IActivityManager;
@@ -33,11 +33,15 @@ import android.content.pm.UserInfo;
 import android.graphics.Bitmap;
 import android.hidl.manager.V1_0.IServiceManager;
 import android.os.Binder;
+import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.Parcel;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.Trace;
 import android.os.UserHandle;
@@ -45,13 +49,21 @@ import android.os.UserManager;
 import android.sysprop.CarProperties;
 import android.util.Slog;
 import android.util.SparseBooleanArray;
+import android.util.TimeUtils;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.car.ExternalConstants.CarUserManagerConstants;
+import com.android.internal.car.ExternalConstants.CarUserServiceConstants;
+import com.android.internal.car.ExternalConstants.ICarConstants;
+import com.android.internal.car.ExternalConstants.UserHalServiceConstants;
+import com.android.internal.car.ExternalConstants.VHalResponseActionConstants;
+import com.android.internal.car.ExternalConstants.VHalUserFlagsConstants;
+import com.android.internal.os.IResultReceiver;
 import com.android.internal.util.UserIcons;
 import com.android.server.SystemService;
-import com.android.server.Watchdog;
 import com.android.server.SystemService.TargetUser;
+import com.android.server.Watchdog;
 import com.android.server.am.ActivityManagerService;
 import com.android.server.utils.TimingsTraceAndSlog;
 import com.android.server.wm.CarLaunchParamsModifier;
@@ -73,20 +85,6 @@ public class CarServiceHelperService extends SystemService {
     private static final String TAG = "CarServiceHelper";
     private static final boolean DBG = true;
     private static final boolean VERBOSE = true;
-    @VisibleForTesting static final String CAR_SERVICE_INTERFACE = "android.car.ICar";
-    // These numbers should match with binder call order of
-    // packages/services/Car/car-lib/src/android/car/ICar.aidl
-    @VisibleForTesting static final int ICAR_CALL_SET_CAR_SERVICE_HELPER = 0;
-    @VisibleForTesting static final int ICAR_CALL_ON_USER_LIFECYCLE = 1;
-    @VisibleForTesting static final int ICAR_CALL_SET_USER_UNLOCK_STATUS = 2;
-    @VisibleForTesting static final int ICAR_CALL_ON_SWITCH_USER = 3;
-
-    // These constants should match CarUserManager
-    @VisibleForTesting static final int USER_LIFECYCLE_EVENT_TYPE_STARTING = 1;
-    @VisibleForTesting static final int USER_LIFECYCLE_EVENT_TYPE_SWITCHING = 2;
-    @VisibleForTesting static final int USER_LIFECYCLE_EVENT_TYPE_UNLOCKED = 3;
-    @VisibleForTesting static final int USER_LIFECYCLE_EVENT_TYPE_STOPPING = 4;
-    @VisibleForTesting static final int USER_LIFECYCLE_EVENT_TYPE_STOPPED = 5;
 
     // Typically there are ~2-5 ops while system and non-system users are starting.
     private final int NUMBER_PENDING_OPERATIONS = 5;
@@ -117,7 +115,21 @@ public class CarServiceHelperService extends SystemService {
     private final IActivityManager mActivityManager;
     private final CarLaunchParamsModifier mCarLaunchParamsModifier;
 
-    // TODO(b/146207078): rather than store Runnables, it would be more efficient to store some
+    private final boolean mHalEnabled;
+    private final int mHalTimeoutMs;
+
+    // Handler is currently only used for handleHalTimedout(), which is removed once received.
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
+
+    @GuardedBy("mLock")
+    private boolean mInitialized;
+
+    /**
+     * End-to-end time (from process start) for unlocking the first non-system user.
+     */
+    private long mFirstUnlockedUserDuration;
+
+    // TODO(b/150413515): rather than store Runnables, it would be more efficient to store some
     // parcelables representing the operation, then pass them to setCarServiceHelper
     @GuardedBy("mLock")
     private ArrayList<Runnable> mPendingOperations;
@@ -143,7 +155,10 @@ public class CarServiceHelperService extends SystemService {
                 UserManager.get(context),
                 ActivityManager.getService(),
                 new CarLaunchParamsModifier(context),
-                context.getString(com.android.internal.R.string.owner_name));
+                context.getString(com.android.internal.R.string.owner_name),
+                CarProperties.user_hal_enabled().orElse(false),
+                CarProperties.user_hal_timeout().orElse(5_000)
+                );
     }
 
     @VisibleForTesting
@@ -153,7 +168,9 @@ public class CarServiceHelperService extends SystemService {
             UserManager userManager,
             IActivityManager activityManager,
             CarLaunchParamsModifier carLaunchParamsModifier,
-            String defaultUserName) {
+            String defaultUserName,
+            boolean halEnabled,
+            int halTimeoutMs) {
         super(context);
         mContext = context;
         mCarUserManagerHelper = carUserManagerHelper;
@@ -161,6 +178,24 @@ public class CarServiceHelperService extends SystemService {
         mActivityManager = activityManager;
         mCarLaunchParamsModifier = carLaunchParamsModifier;
         mDefaultUserName = defaultUserName;
+        boolean halValidUserHalSettings = false;
+        if (halEnabled) {
+            if (halTimeoutMs > 0) {
+                Slog.i(TAG, "User HAL enabled with timeout of " + halTimeoutMs + "ms");
+                halValidUserHalSettings = true;
+            } else {
+                Slog.w(TAG, "Not using User HAL due to invalid value on userHalTimeoutMs config: "
+                        + halTimeoutMs);
+            }
+        }
+        if (halValidUserHalSettings) {
+            mHalEnabled = true;
+            mHalTimeoutMs = halTimeoutMs;
+        } else {
+            mHalEnabled = false;
+            mHalTimeoutMs = -1;
+            Slog.i(TAG, "Not using User HAL");
+        }
     }
 
     @Override
@@ -168,7 +203,7 @@ public class CarServiceHelperService extends SystemService {
         if (DBG) {
             Slog.d(TAG, "onBootPhase:" + phase);
         }
-        TimingsTraceAndSlog t = new TimingsTraceAndSlog(TAG, Trace.TRACE_TAG_SYSTEM_SERVER);
+        TimingsTraceAndSlog t = newTimingsTraceAndSlog();
         if (phase == SystemService.PHASE_THIRD_PARTY_APPS_CAN_START) {
             t.traceBegin("onBootPhase.3pApps");
             mCarLaunchParamsModifier.init();
@@ -197,7 +232,7 @@ public class CarServiceHelperService extends SystemService {
     public void onStart() {
         Intent intent = new Intent();
         intent.setPackage("com.android.car");
-        intent.setAction(CAR_SERVICE_INTERFACE);
+        intent.setAction(ICarConstants.CAR_SERVICE_INTERFACE);
         if (!getContext().bindServiceAsUser(intent, mCarServiceConnection, Context.BIND_AUTO_CREATE,
                 UserHandle.SYSTEM)) {
             Slog.wtf(TAG, "cannot start car service");
@@ -206,40 +241,57 @@ public class CarServiceHelperService extends SystemService {
     }
 
     @Override
-    public void onUnlockUser(@NonNull TargetUser user) {
-        Slog.i(TAG, "onUnlockUser(" + user + ")");
-        sendUserLifecycleEvent(USER_LIFECYCLE_EVENT_TYPE_UNLOCKED, user);
+    public void onUserUnlocking(@NonNull TargetUser user) {
+        Slog.i(TAG, "onUserUnlocking(" + user + ")");
+        sendUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKING, user);
+        // NOTE: handleUserLockStatusChange() should be called by onUserUnlocked(), but it will be
+        // refactored anyways, so we kept the old behavior...
         int userId = user.getUserIdentifier();
         handleUserLockStatusChange(userId, true);
     }
 
     @Override
-    public void onStartUser(@NonNull TargetUser user) {
-        Slog.i(TAG, "onStartUser(" + user + ")");
-        sendUserLifecycleEvent(USER_LIFECYCLE_EVENT_TYPE_STARTING, user);
+    public void onUserUnlocked(@NonNull TargetUser user) {
+        Slog.i(TAG, "onUserUnlocked(" + user + ")");
+        if (mFirstUnlockedUserDuration == 0 && user.getUserIdentifier() != UserHandle.USER_SYSTEM) {
+            mFirstUnlockedUserDuration = SystemClock.elapsedRealtime()
+                    - Process.getStartElapsedRealtime();
+            Slog.i(TAG, "Time to unlock 1st user(" + user + "): "
+                    + TimeUtils.formatDuration(mFirstUnlockedUserDuration));
+            sendFirstUserUnlocked(user);
+            return;
+        }
+        sendUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKED, user);
     }
 
     @Override
-    public void onStopUser(@NonNull TargetUser user) {
+    public void onUserStarting(@NonNull TargetUser user) {
+        Slog.i(TAG, "onStartUser(" + user + ")");
+        sendUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_STARTING, user);
+    }
+
+    @Override
+    public void onUserStopping(@NonNull TargetUser user) {
         Slog.i(TAG, "onStopUser(" + user + ")");
-        sendUserLifecycleEvent(USER_LIFECYCLE_EVENT_TYPE_STOPPING, user);
+        sendUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPING, user);
         int userId = user.getUserIdentifier();
         mCarLaunchParamsModifier.handleUserStopped(userId);
         handleUserLockStatusChange(userId, false);
     }
 
     @Override
-    public void onCleanupUser(@NonNull TargetUser user) {
+    public void onUserStopped(@NonNull TargetUser user) {
         Slog.i(TAG, "onCleanupUser(" + user + ")");
-        sendUserLifecycleEvent(USER_LIFECYCLE_EVENT_TYPE_STOPPED, user);
+        sendUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPED, user);
         int userId = user.getUserIdentifier();
         handleUserLockStatusChange(userId, false);
     }
 
     @Override
-    public void onSwitchUser(@Nullable TargetUser from, @NonNull TargetUser to) {
+    public void onUserSwitching(@Nullable TargetUser from, @NonNull TargetUser to) {
         Slog.i(TAG, "onSwitchUser(" + from + ">>" + to + ")");
-        sendUserLifecycleEvent(USER_LIFECYCLE_EVENT_TYPE_SWITCHING, from, to);
+        sendUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_SWITCHING, from,
+                to);
         int userId = to.getUserIdentifier();
         mCarLaunchParamsModifier.handleCurrentUserSwitching(userId);
         synchronized (mLock) {
@@ -300,7 +352,7 @@ public class CarServiceHelperService extends SystemService {
             mPendingOperations = null;
         }
         Slog.i(TAG, "**CarService connected**");
-        TimingsTraceAndSlog t = new TimingsTraceAndSlog(TAG, Trace.TRACE_TAG_SYSTEM_SERVER);
+        TimingsTraceAndSlog t = newTimingsTraceAndSlog();
 
         t.traceBegin("send-set-helper");
         sendSetCarServiceHelperBinderCall();
@@ -330,6 +382,10 @@ public class CarServiceHelperService extends SystemService {
         }
     }
 
+    private TimingsTraceAndSlog newTimingsTraceAndSlog() {
+        return new TimingsTraceAndSlog(TAG, Trace.TRACE_TAG_SYSTEM_SERVER);
+    }
+
     private void handleUserLockStatusChange(@UserIdInt int userId, boolean unlocked) {
         boolean shouldNotify = false;
         synchronized (mLock) {
@@ -355,13 +411,19 @@ public class CarServiceHelperService extends SystemService {
             return;
         }
         t.traceBegin("setupAndStartUsers");
-        setupAndStartUsers(devicePolicyManager, t);
+        if (mHalEnabled) {
+            Slog.i(TAG, "Delegating initial switching to HAL");
+            setupAndStartUsersUsingHal();
+        } else {
+            setupAndStartUsersDirecly(t);
+        }
         t.traceEnd();
     }
 
     @Nullable
     private UserInfo createInitialAdminUser() {
-        UserInfo adminUserInfo = mUserManager.createUser(mDefaultUserName, UserInfo.FLAG_ADMIN);
+        UserInfo adminUserInfo = mUserManager.createUser(mDefaultUserName,
+                UserManager.USER_TYPE_FULL_SECONDARY, UserInfo.FLAG_ADMIN);
         if (adminUserInfo == null) {
             // Couldn't create user, most likely because there are too many.
             return null;
@@ -391,8 +453,168 @@ public class CarServiceHelperService extends SystemService {
         return false;
     }
 
-    private void setupAndStartUsers(@NonNull DevicePolicyManager devicePolicyManager,
-            @NonNull TimingsTraceAndSlog t) {
+    private void handleHalTimedout() {
+        synchronized (mLock) {
+            if (mInitialized) return;
+        }
+
+        Slog.w(TAG, "HAL didn't respond in " + mHalTimeoutMs + "ms; using default behavior");
+        setupAndStartUsersDirectly();
+    }
+
+    private void setupAndStartUsersUsingHal() {
+        mHandler.sendMessageDelayed(obtainMessage(CarServiceHelperService::handleHalTimedout, this),
+                mHalTimeoutMs);
+
+        // TODO(b/150419360): proper request type (cold boot, first boot, OTA, etc...
+        int requestType = 3; // COLD BOOT
+        // TODO(b/150413515): get rid of receiver once returned?
+        IResultReceiver receiver = new IResultReceiver.Stub() {
+            @Override
+            public void send(int resultCode, Bundle resultData) {
+                mHandler.removeMessages(0);
+                // TODO(b/150222501): log how long it took to receive the response
+                // TODO(b/150413515): print resultData as well on 2 logging calls below
+                synchronized (mLock) {
+                    if (mInitialized) {
+                        Slog.w(TAG, "Result from HAL came too late, ignoring: "
+                                + UserHalServiceConstants.statusToString(resultCode));
+                        return;
+                    }
+                }
+                if (DBG) {
+                    Slog.d(TAG, "Got result from HAL: "
+                            + UserHalServiceConstants.statusToString(resultCode));
+                }
+
+                if (resultCode != UserHalServiceConstants.STATUS_OK) {
+                    Slog.w(TAG, "Service returned non-ok status ("
+                            + UserHalServiceConstants.statusToString(resultCode)
+                            + "); using default behavior");
+                    fallbackToDefaultInitialUserBehavior();
+                    return;
+                }
+
+                if (resultData == null) {
+                    Slog.w(TAG, "Service returned null bundle");
+                    fallbackToDefaultInitialUserBehavior();
+                    return;
+                }
+
+                int action = resultData.getInt(CarUserServiceConstants.BUNDLE_INITIAL_INFO_ACTION,
+                        VHalResponseActionConstants.DEFAULT);
+
+                switch (action) {
+                    case VHalResponseActionConstants.DEFAULT:
+                        Slog.i(TAG, "User HAL returned DEFAULT behavior");
+                        setupAndStartUsersDirectly();
+                        return;
+                    case VHalResponseActionConstants.SWITCH:
+                        int userId = resultData.getInt(CarUserServiceConstants.BUNDLE_USER_ID);
+                        startUserByHalRequest(userId);
+                        return;
+                    case VHalResponseActionConstants.CREATE:
+                        String name = resultData
+                                .getString(CarUserServiceConstants.BUNDLE_USER_NAME);
+                        int flags = resultData.getInt(CarUserServiceConstants.BUNDLE_USER_FLAGS);
+                        createUserByHalRequest(name, flags);
+                        return;
+                    default:
+                        Slog.w(TAG, "Invalid InitialUserInfoResponseAction action: " + action);
+                }
+                fallbackToDefaultInitialUserBehavior();
+            }
+        };
+
+        sendOrQueueGetInitialUserInfo(requestType, receiver);
+    }
+
+    private void startUserByHalRequest(@UserIdInt int userId) {
+        if (userId <= 0) {
+            Slog.w(TAG, "invalid (or missing) user id sent by HAL: " + userId);
+            fallbackToDefaultInitialUserBehavior();
+            return;
+        }
+        try {
+            Slog.i(TAG, "Starting user " + userId + " as requested by HAL");
+            if (mActivityManager.startUserInForegroundWithListener(userId,
+                        /* unlockProgressListener= */ null)) {
+                // All good...
+                return;
+            }
+            Slog.w(TAG, "AM didn't start user " + userId);
+        } catch (RemoteException | RuntimeException e) {
+            Slog.w(TAG, "AM failed to start user " + userId + ": " + e);
+        }
+        fallbackToDefaultInitialUserBehavior();
+    }
+
+    private void createUserByHalRequest(@Nullable String name, int halFlags) {
+        String friendlyName = "user with name '" + safeName(name) + "' and flags "
+                + VHalUserFlagsConstants.toString(halFlags);
+
+        Slog.i(TAG, "HAL request creation of " + friendlyName);
+
+        if (VHalUserFlagsConstants.isSystem(halFlags)) {
+            Slog.w(TAG, "Cannot create system user");
+            fallbackToDefaultInitialUserBehavior();
+            return;
+        }
+
+        if (VHalUserFlagsConstants.isAdmin(halFlags)) {
+            boolean validAdmin = true;
+            if (VHalUserFlagsConstants.isGuest(halFlags)) {
+                Slog.w(TAG, "Cannot create guest admin");
+                validAdmin = false;
+            }
+            if (VHalUserFlagsConstants.isEphemeral(halFlags)) {
+                Slog.w(TAG, "Cannot create ephemeral admin");
+                validAdmin = false;
+            }
+            if (!validAdmin) {
+                fallbackToDefaultInitialUserBehavior();
+                return;
+            }
+        }
+
+        String type = VHalUserFlagsConstants.isGuest(halFlags) ? UserManager.USER_TYPE_FULL_GUEST
+                : UserManager.USER_TYPE_FULL_SECONDARY;
+
+        int flags = VHalUserFlagsConstants.toUserInfoFlags(halFlags);
+        if (DBG) Slog.d(TAG, "new user: type=" + type + ", flags=" + UserInfo.flagsToString(flags));
+
+        // TODO(b/150413515): decide what to if HAL requested a non-ephemeral guest but framework
+        // sets all guests as ephemeral - should it fail or just warn?
+
+        UserInfo newUser = mUserManager.createUser(name, type, flags);
+
+        if (newUser == null) {
+            Slog.w(TAG, "Failed to create " + friendlyName);
+            fallbackToDefaultInitialUserBehavior();
+            return;
+        }
+
+        startUserByHalRequest(newUser.id);
+    }
+
+    private void fallbackToDefaultInitialUserBehavior() {
+        Slog.i(TAG, "Falling back to DEFAULT initial user behavior");
+        setupAndStartUsersDirectly();
+    }
+
+    private void setupAndStartUsersDirectly() {
+        setupAndStartUsersDirecly(newTimingsTraceAndSlog());
+    }
+
+    private void setupAndStartUsersDirecly(@NonNull TimingsTraceAndSlog t) {
+        synchronized (mLock) {
+            if (mInitialized) {
+                Slog.wtf(TAG, "Already initialized", new Exception());
+                return;
+            }
+            mInitialized = true;
+        }
+
         // Offloading the whole unlock into separate thread did not help due to single locks
         // used in AMS / PMS ended up stopping the world with lots of lock contention.
         // To run these in background, there should be some improvements there.
@@ -452,7 +674,7 @@ public class CarServiceHelperService extends SystemService {
                 Slog.w(TAG, "could not restart system user in foreground; trying unlock instead");
                 t.traceBegin("forceUnlockSystemUser");
                 boolean unlocked = mActivityManager.unlockUser(UserHandle.USER_SYSTEM,
-                        /* token= */ null, /* secret= */ null, /* listner= */ null);
+                        /* token= */ null, /* secret= */ null, /* listener= */ null);
                 t.traceEnd();
                 if (!unlocked) {
                     Slog.w(TAG, "could not unlock system user neither");
@@ -616,27 +838,27 @@ public class CarServiceHelperService extends SystemService {
 
     private void sendSetCarServiceHelperBinderCall() {
         Parcel data = Parcel.obtain();
-        data.writeInterfaceToken(CAR_SERVICE_INTERFACE);
+        data.writeInterfaceToken(ICarConstants.CAR_SERVICE_INTERFACE);
         data.writeStrongBinder(mHelper.asBinder());
         // void setCarServiceHelper(in IBinder helper)
-        sendBinderCallToCarService(data, ICAR_CALL_SET_CAR_SERVICE_HELPER);
+        sendBinderCallToCarService(data, ICarConstants.ICAR_CALL_SET_CAR_SERVICE_HELPER);
     }
 
     private void sendSetUserLockStatusBinderCall(@UserIdInt int userId, boolean unlocked) {
         Parcel data = Parcel.obtain();
-        data.writeInterfaceToken(CAR_SERVICE_INTERFACE);
+        data.writeInterfaceToken(ICarConstants.CAR_SERVICE_INTERFACE);
         data.writeInt(userId);
         data.writeInt(unlocked ? 1 : 0);
         // void setUserLockStatus(in int userId, in int unlocked)
-        sendBinderCallToCarService(data, ICAR_CALL_SET_USER_UNLOCK_STATUS);
+        sendBinderCallToCarService(data, ICarConstants.ICAR_CALL_SET_USER_UNLOCK_STATUS);
     }
 
     private void sendSwitchUserBindercall(@UserIdInt int userId) {
         Parcel data = Parcel.obtain();
-        data.writeInterfaceToken(CAR_SERVICE_INTERFACE);
+        data.writeInterfaceToken(ICarConstants.CAR_SERVICE_INTERFACE);
         data.writeInt(userId);
         // void onSwitchUser(in int userId)
-        sendBinderCallToCarService(data, ICAR_CALL_ON_SWITCH_USER);
+        sendBinderCallToCarService(data, ICarConstants.ICAR_CALL_ON_SWITCH_USER);
     }
 
     private void sendUserLifecycleEvent(int eventType, @NonNull TargetUser user) {
@@ -653,7 +875,7 @@ public class CarServiceHelperService extends SystemService {
                 return;
             }
         }
-        TimingsTraceAndSlog t = new TimingsTraceAndSlog(TAG, Trace.TRACE_TAG_SYSTEM_SERVER);
+        TimingsTraceAndSlog t = newTimingsTraceAndSlog();
         t.traceBegin("send-lifecycle-" + eventType + "-" + to.getUserIdentifier());
         sendUserLifecycleEvent(eventType, now, from, to);
         t.traceEnd();
@@ -663,13 +885,45 @@ public class CarServiceHelperService extends SystemService {
             @NonNull TargetUser to) {
         int fromId = from == null ? UserHandle.USER_NULL : from.getUserIdentifier();
         Parcel data = Parcel.obtain();
-        data.writeInterfaceToken(CAR_SERVICE_INTERFACE);
+        data.writeInterfaceToken(ICarConstants.CAR_SERVICE_INTERFACE);
         data.writeInt(eventType);
         data.writeLong(timestamp);
         data.writeInt(fromId);
         data.writeInt(to.getUserIdentifier());
         // void onUserLifecycleEvent(int eventType, long timestamp, int from, int to)
-        sendBinderCallToCarService(data, ICAR_CALL_ON_USER_LIFECYCLE);
+        sendBinderCallToCarService(data, ICarConstants.ICAR_CALL_ON_USER_LIFECYCLE);
+    }
+
+    private void sendOrQueueGetInitialUserInfo(int requestType, @NonNull IResultReceiver receiver) {
+        synchronized (mLock) {
+            if (mCarService == null) {
+                if (DBG) Slog.d(TAG, "Queuing GetInitialUserInfo call for type " + requestType);
+                queueOperationLocked(() -> sendGetInitialUserInfo(requestType, receiver));
+                return;
+            }
+        }
+        sendGetInitialUserInfo(requestType, receiver);
+    }
+
+    private void sendGetInitialUserInfo(int requestType, @NonNull IResultReceiver receiver) {
+        Parcel data = Parcel.obtain();
+        data.writeInterfaceToken(ICarConstants.CAR_SERVICE_INTERFACE);
+        data.writeInt(requestType);
+        data.writeInt(mHalTimeoutMs);
+        data.writeStrongBinder(receiver.asBinder());
+        // void getInitialUserInfo(int requestType, int timeoutMs, in IResultReceiver receiver)
+        sendBinderCallToCarService(data, ICarConstants.ICAR_CALL_GET_INITIAL_USER_INFO);
+    }
+
+    private void sendFirstUserUnlocked(@NonNull TargetUser user) {
+        long now = System.currentTimeMillis();
+        Parcel data = Parcel.obtain();
+        data.writeInterfaceToken(ICarConstants.CAR_SERVICE_INTERFACE);
+        data.writeInt(user.getUserIdentifier());
+        data.writeLong(now);
+        data.writeLong(mFirstUnlockedUserDuration);
+        // void onFirstUserUnlocked(int userId, long timestampMs, ong duration)
+        sendBinderCallToCarService(data, ICarConstants.ICAR_CALL_FIRST_USER_UNLOCKED);
     }
 
     private void sendBinderCallToCarService(Parcel data, int callNumber) {
@@ -751,7 +1005,7 @@ public class CarServiceHelperService extends SystemService {
         pids.add(Process.myPid());
 
         ActivityManagerService.dumpStackTraces(
-                pids, null, null, getInterestingNativePids());
+                pids, null, null, getInterestingNativePids(), null);
     }
 
     private void handleCarServiceCrash() {
@@ -769,6 +1023,17 @@ public class CarServiceHelperService extends SystemService {
             Slog.w(TAG, "*** CARHELPER ignoring: " + "CarService crash");
         }
     }
+
+    /**
+     * Gets a PII-safe representation of the name.
+     */
+    @Nullable
+    private static String safeName(@Nullable String name) {
+        // TODO(b/150419600): move to helper / add unit test
+        return name == null ? name : name.length() + "_chars";
+    }
+
+
 
     private static native int nativeForceSuspend(int timeoutMs);
 
