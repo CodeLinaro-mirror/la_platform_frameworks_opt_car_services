@@ -16,10 +16,12 @@
 
 package com.android.internal.car;
 
-import static com.android.dx.mockito.inline.extended.ExtendedMockito.doAnswer;
-import static com.android.dx.mockito.inline.extended.ExtendedMockito.doNothing;
+import static android.car.test.util.UserTestingHelper.getDefaultUserType;
+import static android.car.test.util.UserTestingHelper.newGuestUser;
+import static android.car.test.util.UserTestingHelper.newSecondaryUser;
+import static android.car.test.util.UserTestingHelper.UserInfoBuilder;
+
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.doReturn;
-import static com.android.dx.mockito.inline.extended.ExtendedMockito.doThrow;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.mock;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.mockitoSession;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.verify;
@@ -43,7 +45,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 
 import android.annotation.NonNull;
+import android.annotation.UserIdInt;
 import android.app.ActivityManager;
+import android.car.test.mocks.AbstractExtendedMockitoTestCase;
+import android.car.test.mocks.SyncAnswer;
 import android.car.userlib.CarUserManagerHelper;
 import android.car.userlib.InitialUserSetter;
 import android.car.userlib.UserHalHelper;
@@ -67,18 +72,16 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.util.Log;
-import android.util.Slog;
+import android.sysprop.CarProperties;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 
-import com.android.dx.mockito.inline.extended.StaticMockitoSession;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.car.ExternalConstants.CarUserManagerConstants;
 import com.android.internal.car.ExternalConstants.CarUserServiceConstants;
 import com.android.internal.car.ExternalConstants.ICarConstants;
 import com.android.internal.car.ExternalConstants.UserHalServiceConstants;
 import com.android.internal.os.IResultReceiver;
-import com.android.internal.util.UserIcons;
 import com.android.server.SystemService;
 import com.android.server.SystemService.TargetUser;
 import com.android.server.wm.CarLaunchParamsModifier;
@@ -95,15 +98,23 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.quality.Strictness;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
+
 
 /**
  * This class contains unit tests for the {@link CarServiceHelperService}.
  */
 @RunWith(AndroidJUnit4.class)
-public class CarHelperServiceTest {
+public class CarHelperServiceTest extends AbstractExtendedMockitoTestCase {
 
     private static final String TAG = CarHelperServiceTest.class.getSimpleName();
+
+    private static final int PRE_CREATED_USER_ID = 24;
+    private static final int PRE_CREATED_GUEST_ID = 25;
+    private static final int USER_MANAGER_TIMEOUT_MS = 100;
+
 
     private static final String HAL_USER_NAME = "HAL 9000";
     private static final int HAL_USER_ID = 42;
@@ -119,8 +130,6 @@ public class CarHelperServiceTest {
             + ADDITIONAL_TIME_MS;
 
     private CarServiceHelperService mHelper;
-
-    private StaticMockitoSession mStaticMockitoSession;
 
     @Mock
     private Context mMockContext;
@@ -149,17 +158,15 @@ public class CarHelperServiceTest {
     /**
      * Initialize objects and setup testing environment.
      */
+    @Override
+    protected void onSessionBuilder(CustomMockitoSessionBuilder session) {
+        session
+                .spyStatic(CarProperties.class)
+                .spyStatic(UserManager.class);
+    }
+
     @Before
     public void setUpMocks() {
-        mStaticMockitoSession = mockitoSession()
-                .initMocks(this)
-                .spyStatic(Slog.class)
-                .mockStatic(UserIcons.class)
-                .strictness(Strictness.LENIENT)
-                .startMocking();
-
-        interceptWtfCalls();
-
         mHelper = new CarServiceHelperService(
                 mMockContext,
                 mUserManagerHelper,
@@ -169,12 +176,8 @@ public class CarHelperServiceTest {
                 mCarWatchdogDaemonHelper,
                 /* halEnabled= */ true,
                 HAL_TIMEOUT_MS);
-        when(mMockContext.getPackageManager()).thenReturn(mPackageManager);
-    }
 
-    @After
-    public void tearDown() {
-        mStaticMockitoSession.finishMocking();
+        when(mMockContext.getPackageManager()).thenReturn(mPackageManager);
     }
 
     /**
@@ -196,7 +199,6 @@ public class CarHelperServiceTest {
         halLessHelper.onBootPhase(SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
 
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -209,9 +211,9 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -225,9 +227,9 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isLessThan(0);
 
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -241,11 +243,11 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         sleep("to make sure not called again", POST_HAL_NOT_REPLYING_TIMEOUT_MS);
 
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -258,9 +260,9 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -273,9 +275,9 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -287,9 +289,9 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         verifyUserSwitchedByHal();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -302,10 +304,10 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         verifyUserNotSwitchedByHal();
         verifyDefaultBootBehavior();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -318,13 +320,13 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarGetInitialUserInfoCalled();
+        assertThat(mHelper.getHalResponseTime()).isGreaterThan(0);
 
         verifyUserCreatedByHal();
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserStartingNotifiesICar() throws Exception {
+    public void testOnUserStarting_notifiesICar() throws Exception {
         bindMockICar();
 
         int userId = 10;
@@ -335,11 +337,19 @@ public class CarHelperServiceTest {
 
         assertNoICarCallExceptions();
         verifyICarOnUserLifecycleEventCalled();
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserSwitchingNotifiesICar() throws Exception {
+    public void testOnUserStarting_preCreatedDoesntNotifyICar() throws Exception {
+        bindMockICar();
+
+        mHelper.onUserStarting(newTargetUser(10, /* preCreated= */ true));
+
+        verifyICarOnUserLifecycleEventNeverCalled();
+    }
+
+    @Test
+    public void testOnUserSwitching_notifiesICar() throws Exception {
         bindMockICar();
 
         int currentUserId = 10;
@@ -352,11 +362,19 @@ public class CarHelperServiceTest {
                 newTargetUser(targetUserId));
 
         assertNoICarCallExceptions();
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserUnlockingNotifiesICar() throws Exception {
+    public void testOnUserSwitching_preCreatedDoesntNotifyICar() throws Exception {
+        bindMockICar();
+
+        mHelper.onUserSwitching(newTargetUser(10), newTargetUser(11, /* preCreated= */ true));
+
+        verifyICarOnUserLifecycleEventNeverCalled();
+    }
+
+    @Test
+    public void testOnUserUnlocking_notifiesICar() throws Exception {
         bindMockICar();
 
         int userId = 10;
@@ -364,15 +382,22 @@ public class CarHelperServiceTest {
                 userId);
         expectICarSetUserLockStatus(userId, true);
 
-        mHelper.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
         mHelper.onUserUnlocking(newTargetUser(userId));
 
         assertNoICarCallExceptions();
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserUnlockedNotifiesICar_systemUserFirst() throws Exception {
+    public void testOnUserUnlocking_preCreatedDoesntNotifyICar() throws Exception {
+        bindMockICar();
+
+        mHelper.onUserUnlocking(newTargetUser(10, /* preCreated= */ true));
+
+        verifyICarOnUserLifecycleEventNeverCalled();
+    }
+
+    @Test
+    public void testOnUserUnlocked_notifiesICar_systemUserFirst() throws Exception {
         bindMockICar();
 
         int systemUserId = UserHandle.USER_SYSTEM;
@@ -382,6 +407,7 @@ public class CarHelperServiceTest {
         int firstUserId = 10;
         expectICarFirstUserUnlocked(firstUserId);
 
+        setHalResponseTime();
         mHelper.onUserUnlocked(newTargetUser(systemUserId));
         mHelper.onUserUnlocked(newTargetUser(firstUserId));
 
@@ -389,11 +415,10 @@ public class CarHelperServiceTest {
 
         verifyICarOnUserLifecycleEventCalled(); // system user
         verifyICarFirstUserUnlockedCalled();    // first user
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserUnlockedNotifiesICar_firstUserReportedJustOnce() throws Exception {
+    public void testOnUserUnlocked_notifiesICar_firstUserReportedJustOnce() throws Exception {
         bindMockICar();
 
         int firstUserId = 10;
@@ -403,6 +428,7 @@ public class CarHelperServiceTest {
         expectICarOnUserLifecycleEvent(CarUserManagerConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKED,
                 secondUserId);
 
+        setHalResponseTime();
         mHelper.onUserUnlocked(newTargetUser(firstUserId));
         mHelper.onUserUnlocked(newTargetUser(secondUserId));
 
@@ -410,11 +436,10 @@ public class CarHelperServiceTest {
 
         verifyICarFirstUserUnlockedCalled();    // first user
         verifyICarOnUserLifecycleEventCalled(); // second user
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserStoppingNotifiesICar() throws Exception {
+    public void testOnUserStopping_notifiesICar() throws Exception {
         bindMockICar();
 
         int userId = 10;
@@ -422,15 +447,22 @@ public class CarHelperServiceTest {
                 userId);
         expectICarSetUserLockStatus(userId, false);
 
-        mHelper.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
         mHelper.onUserStopping(newTargetUser(userId));
 
         assertNoICarCallExceptions();
-        verifyWtfNeverLogged();
     }
 
     @Test
-    public void testOnUserStoppedNotifiesICar() throws Exception {
+    public void testOnUserStopping_preCreatedDoesntNotifyICar() throws Exception {
+        bindMockICar();
+
+        mHelper.onUserStopping(newTargetUser(10, /* preCreated= */ true));
+
+        verifyICarOnUserLifecycleEventNeverCalled();
+    }
+
+    @Test
+    public void testOnUserStopped_notifiesICar() throws Exception {
         bindMockICar();
 
         int userId = 10;
@@ -438,11 +470,18 @@ public class CarHelperServiceTest {
                 userId);
         expectICarSetUserLockStatus(userId, false);
 
-        mHelper.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
         mHelper.onUserStopped(newTargetUser(userId));
 
         assertNoICarCallExceptions();
-        verifyWtfNeverLogged();
+    }
+
+    @Test
+    public void testOnUserStopped_preCreatedDoesntNotifyICar() throws Exception {
+        bindMockICar();
+
+        mHelper.onUserStopped(newTargetUser(10, /* preCreated= */ true));
+
+        verifyICarOnUserLifecycleEventNeverCalled();
     }
 
     @Test
@@ -456,7 +495,6 @@ public class CarHelperServiceTest {
 
         verifyICarSetInitialUserCalled();
         assertNoICarCallExceptions();
-        verifyWtfNeverLogged();
     }
 
     @Test
@@ -483,17 +521,122 @@ public class CarHelperServiceTest {
                 .isEqualTo(InitialUserInfoRequestType.COLD_BOOT);
     }
 
+    @Test
+    public void testPreCreatedUsersLessThanRequested() throws Exception {
+        // Set existing user
+        expectNoPreCreatedUser();
+        // Set number of requested user
+        setNumberRequestedUsersProperty(1);
+        setNumberRequestedGuestsProperty(0);
+
+        SyncAnswer syncUserInfo = mockPreCreateUser(/* isGuest= */ false);
+        mHelper.managePreCreatedUsers();
+        syncUserInfo.await(USER_MANAGER_TIMEOUT_MS);
+
+        verifyUserCreated(/* isGuest= */ false);
+    }
+
+    @Test
+    public void testPreCreatedGuestsLessThanRequested() throws Exception {
+        // Set existing user
+        expectNoPreCreatedUser();
+        // Set number of requested user
+        setNumberRequestedUsersProperty(0);
+        setNumberRequestedGuestsProperty(1);
+
+        SyncAnswer syncUserInfo = mockPreCreateUser(/* isGuest= */ true);
+        mHelper.managePreCreatedUsers();
+        syncUserInfo.await(USER_MANAGER_TIMEOUT_MS);
+
+        verifyUserCreated(/* isGuest= */ true);
+    }
+
+    @Test
+    public void testRemovePreCreatedUser() throws Exception {
+        UserInfo user = expectPreCreatedUser(/* isGuest= */ false,
+                /* isInitialized= */ true);
+        setNumberRequestedUsersProperty(0);
+        setNumberRequestedGuestsProperty(0);
+
+        SyncAnswer syncRemoveStatus = mockRemoveUser(PRE_CREATED_USER_ID);
+        mHelper.managePreCreatedUsers();
+        syncRemoveStatus.await(USER_MANAGER_TIMEOUT_MS);
+
+        verifyUserRemoved(user);
+    }
+
+    @Test
+    public void testRemovePreCreatedGuest() throws Exception {
+        UserInfo user = expectPreCreatedUser(/* isGuest= */ true,
+                /* isInitialized= */ true);
+        setNumberRequestedUsersProperty(0);
+        setNumberRequestedGuestsProperty(0);
+
+        SyncAnswer syncRemoveStatus = mockRemoveUser(PRE_CREATED_GUEST_ID);
+        mHelper.managePreCreatedUsers();
+        syncRemoveStatus.await(USER_MANAGER_TIMEOUT_MS);
+
+        verifyUserRemoved(user);
+    }
+
+    @Test
+    public void testRemoveInvalidPreCreatedUser() throws Exception {
+        UserInfo user = expectPreCreatedUser(/* isGuest= */ false,
+                /* isInitialized= */ false);
+        setNumberRequestedUsersProperty(0);
+        setNumberRequestedGuestsProperty(0);
+
+        SyncAnswer syncRemoveStatus = mockRemoveUser(PRE_CREATED_USER_ID);
+        mHelper.managePreCreatedUsers();
+        syncRemoveStatus.await(USER_MANAGER_TIMEOUT_MS);
+
+        verifyUserRemoved(user);
+    }
+
+    @Test
+    public void testManagePreCreatedUserDoNothing() throws Exception {
+        // TODO(b/152792035) refactor managePreCreatedUsers to separate the thread
+        // operation into a new method
+        UserInfo user = expectPreCreatedUser(/* isGuest= */ false,
+                /* isInitialized= */ true);
+        setNumberRequestedUsersProperty(1);
+        setNumberRequestedGuestsProperty(0);
+        mockPreCreateUser(/* isGuest= */ false);
+        mockRemoveUser(PRE_CREATED_USER_ID);
+
+        mHelper.managePreCreatedUsers();
+
+        // TODO(b/152792035) remove after refactoring managePreCreatedUsers
+        sleep("before checking mUserManager", 200);
+        verifyNoUserPreCreated();
+        verifyUserNotRemoved(user);
+    }
+
+    private void setHalResponseTime() {
+        mHelper.setInitialHalResponseTime();
+        SystemClock.sleep(1); // must sleep at least 1ms so it's not 0
+        mHelper.setFinalHalResponseTime();
+    }
+
     /**
      * Used in cases where the result of calling HAL for the initial info should be the same as
      * not using HAL.
      */
     private void verifyDefaultBootBehavior() throws Exception {
-        verify(mInitialUserSetter).executeDefaultBehavior();
+        verify(mInitialUserSetter).executeDefaultBehavior(/* replaceGuest= */ false);
     }
 
     private TargetUser newTargetUser(int userId) {
+        return newTargetUser(userId, /* preCreated= */ false);
+    }
+
+    private TargetUser newTargetUser(int userId, boolean preCreated) {
         TargetUser targetUser = mock(TargetUser.class);
         when(targetUser.getUserIdentifier()).thenReturn(userId);
+        UserInfo userInfo = new UserInfo();
+        userInfo.id = userId;
+        userInfo.preCreated = preCreated;
+        when(targetUser.getUserInfo()).thenReturn(userInfo);
         return targetUser;
     }
 
@@ -511,11 +654,11 @@ public class CarHelperServiceTest {
     }
 
     private void verifyUserSwitchedByHal() {
-        verify(mInitialUserSetter).switchUser(HAL_USER_ID);
+        verify(mInitialUserSetter).switchUser(HAL_USER_ID, false);
     }
 
     private void verifyUserNotSwitchedByHal() {
-        verify(mInitialUserSetter, never()).switchUser(anyInt());
+        verify(mInitialUserSetter, never()).switchUser(anyInt(), anyBoolean());
     }
 
     // TODO: create a custom matcher / verifier for binder calls
@@ -578,17 +721,17 @@ public class CarHelperServiceTest {
                         int actualUserId = data.readInt();
                         long actualTimestamp = data.readLong();
                         long actualDuration = data.readLong();
+                        int actualHalResponseTime = data.readInt();
                         Log.d(TAG, "Unmarshalled data: userId= " + actualUserId
                                 + ", timestamp= " + actualTimestamp
-                                + ", duration=" + actualDuration);
+                                + ", duration=" + actualDuration
+                                + ", halResponseTime=" + actualHalResponseTime);
                         List<String> errors = new ArrayList<>();
                         assertParcelValue(errors, "userId", expectedUserId, actualUserId);
                         assertParcelValueInRange(errors, "timestamp", before, actualTimestamp,
                                 after);
-                        if (actualDuration < minDuration) {
-                            errors.add("Minimum duration should be " + minDuration + " (was "
-                                    + actualDuration + ")");
-                        }
+                        assertMinimumParcelValue(errors, "duration", minDuration, actualDuration);
+                        assertMinimumParcelValue(errors, "halResponseTime", 1, actualHalResponseTime);
                         assertNoParcelErrors(errors);
                         return true;
                     } catch (Exception e) {
@@ -744,6 +887,27 @@ public class CarHelperServiceTest {
                 });
     }
 
+    private void expectNoPreCreatedUser() throws Exception {
+        when(mUserManager.getUsers(/* excludePartial= */ true,
+                /* excludeDying= */ true, /* excludePreCreated= */ false))
+                .thenReturn(new ArrayList<UserInfo> ());
+    }
+
+    private UserInfo expectPreCreatedUser(boolean isGuest, boolean isInitialized)
+            throws Exception {
+        int userId = isGuest ? PRE_CREATED_GUEST_ID : PRE_CREATED_USER_ID;
+        UserInfo user = new UserInfoBuilder(userId)
+                .setGuest(isGuest)
+                .setPreCreated(true)
+                .setInitialized(isInitialized)
+                .build();
+
+        when(mUserManager.getUsers(/* excludePartial= */ true,
+                /* excludeDying= */ true, /* excludePreCreated= */ false))
+                .thenReturn(Arrays.asList(user));
+        return user;
+    }
+
     private interface GetInitialUserInfoAction {
         void onReceiver(IResultReceiver receiver) throws Exception;
     }
@@ -799,6 +963,10 @@ public class CarHelperServiceTest {
         verifyICarTxnCalled(ICarConstants.ICAR_CALL_ON_USER_LIFECYCLE);
     }
 
+    private void verifyICarOnUserLifecycleEventNeverCalled() throws Exception {
+        verifyICarTxnNeverCalled(ICarConstants.ICAR_CALL_ON_USER_LIFECYCLE);
+    }
+
     private void verifyICarFirstUserUnlockedCalled() throws Exception {
         verifyICarTxnCalled(ICarConstants.ICAR_CALL_FIRST_USER_UNLOCKED);
     }
@@ -813,8 +981,62 @@ public class CarHelperServiceTest {
 
     private void verifyICarTxnCalled(int txnId) throws Exception {
         int txn = IBinder.FIRST_CALL_TRANSACTION + txnId;
-        verify(mICarBinder, times(1)).transact(eq(txn), notNull(), isNull(),
-                eq(Binder.FLAG_ONEWAY));
+        verify(mICarBinder).transact(eq(txn), notNull(), isNull(), eq(Binder.FLAG_ONEWAY));
+    }
+
+    private void verifyICarTxnNeverCalled(int txnId) throws Exception {
+        int txn = IBinder.FIRST_CALL_TRANSACTION + txnId;
+        verify(mICarBinder, never()).transact(eq(txn), notNull(), isNull(), eq(Binder.FLAG_ONEWAY));
+    }
+
+    private void setNumberRequestedUsersProperty(int numberUser) {
+        doReturn(Optional.of(numberUser)).when(() -> CarProperties.number_pre_created_users());
+    }
+
+    private void setNumberRequestedGuestsProperty(int numberGuest) {
+        doReturn(Optional.of(numberGuest)).when(() -> CarProperties.number_pre_created_guests());
+    }
+
+    private SyncAnswer mockPreCreateUser(boolean isGuest) {
+        UserInfo newUser = isGuest ? newGuestUser(PRE_CREATED_GUEST_ID) :
+                newSecondaryUser(PRE_CREATED_USER_ID);
+        SyncAnswer<UserInfo> syncUserInfo = SyncAnswer.forReturn(newUser);
+        when(mUserManager.preCreateUser(getDefaultUserType(isGuest)))
+                .thenAnswer(syncUserInfo);
+
+        return syncUserInfo;
+    }
+
+    private SyncAnswer mockRemoveUser(@UserIdInt int userId) {
+        SyncAnswer<Boolean> syncRemoveStatus = SyncAnswer.forReturn(true);
+        when(mUserManager.removeUser(userId)).thenAnswer(syncRemoveStatus);
+
+        return syncRemoveStatus;
+    }
+
+    private SyncAnswer mockPreCreateUserException() {
+        SyncAnswer<UserInfo> syncException = SyncAnswer.forException(new Exception());
+        when(mUserManager.preCreateUser(anyString()))
+                .thenAnswer(syncException);
+        return syncException;
+    }
+
+    private void verifyUserCreated(boolean isGuest) throws Exception {
+        String userType =
+                isGuest ? UserManager.USER_TYPE_FULL_GUEST : UserManager.USER_TYPE_FULL_SECONDARY;
+        verify(mUserManager).preCreateUser(eq(userType));
+    }
+
+    private void verifyUserRemoved(UserInfo user) throws Exception {
+        verify(mUserManager).removeUser(user.id);
+    }
+
+    private void verifyNoUserPreCreated() throws Exception {
+        verify(mUserManager, never()).preCreateUser(any());
+    }
+
+    private void verifyUserNotRemoved(UserInfo user) throws Exception {
+        verify(mUserManager, never()).removeUser(user.id);
     }
 
     private void assertParcelValue(List<String> errors, String field, int expected,
@@ -831,6 +1053,14 @@ public class CarHelperServiceTest {
             errors.add(field + " (" + actual+ ") not in range [" + before + ", " + after + "]");
         }
     }
+
+    private void assertMinimumParcelValue(List<String> errors, String field, long min,
+            long actual) {
+        if (actual < min) {
+            errors.add("Minimum " + field + " should be " + min + " (was " + actual + ")");
+        }
+    }
+
     private void assertNoParcelErrors(List<String> errors) {
         int size = errors.size();
         if (size == 0) return;
@@ -853,43 +1083,5 @@ public class CarHelperServiceTest {
         if (mBinderCallException != null)
             throw mBinderCallException;
 
-    }
-
-    // TODO(b/149099817): members below should be moved to common code
-
-    // Tracks Log.wtf() calls made during code execution / used on verifyWtfNeverLogged()
-    private final List<UnsupportedOperationException> mWtfs = new ArrayList<>();
-
-    private void interceptWtfCalls() {
-        doAnswer((invocation) -> {
-            return addWtf(invocation);
-        }).when(() -> Slog.wtf(anyString(), anyString()));
-        doAnswer((invocation) -> {
-            return addWtf(invocation);
-        }).when(() -> Slog.wtf(anyString(), anyString(), notNull()));
-    }
-
-    private Object addWtf(InvocationOnMock invocation) {
-        String message = "Called " + invocation;
-        Log.d(TAG, message); // Log always, as some test expect it
-        mWtfs.add(new UnsupportedOperationException(message));
-        return null;
-    }
-
-    // TODO: should be part of @After, but then it would hide the real test failure (if any). We'd
-    // need a custom rule (like CTS's SafeCleaner) for it...
-    private void verifyWtfNeverLogged() {
-        int size = mWtfs.size();
-
-        switch (size) {
-            case 0:
-                return;
-            case 1:
-                throw mWtfs.get(0);
-            default:
-                StringBuilder msg = new StringBuilder("wtf called ").append(size).append(" times")
-                        .append(": ").append(mWtfs);
-                fail(msg.toString());
-        }
     }
 }
