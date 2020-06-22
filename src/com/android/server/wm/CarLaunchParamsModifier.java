@@ -16,8 +16,10 @@
 
 package com.android.server.wm;
 
+import android.annotation.Nullable;
 import android.app.ActivityOptions;
 import android.app.ActivityTaskManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.hardware.display.DisplayManager;
@@ -27,30 +29,35 @@ import android.os.UserHandle;
 import android.util.Slog;
 import android.util.SparseIntArray;
 import android.view.Display;
+import android.window.WindowContainerToken;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
- * Class to control the assignment of a diplsay for Car while launching a Activity.
+ * Class to control the assignment of a display for Car while launching a Activity.
  *
  * <p>This one controls which displays users are allowed to launch.
  * The policy should be passed from car service through
  * {@link com.android.internal.car.ICarServiceHelper} binder interfaces. If no policy is set,
  * this module will not change anything for launch process.</p>
  *
- * <p> The policy can only affect which display passenger users can use. Currnt user, assumed
+ * <p> The policy can only affect which display passenger users can use. Current user, assumed
  * to be a driver user, is allowed to launch any display always.</p>
  */
 public final class CarLaunchParamsModifier implements LaunchParamsController.LaunchParamsModifier {
 
     private static final String TAG = "CAR.LAUNCH";
+    private static final boolean DBG = false;
 
     private final Context mContext;
 
     private DisplayManager mDisplayManager;  // set only from init()
+    private ActivityTaskManagerService mAtm;  // set only from init()
 
     private final Object mLock = new Object();
 
@@ -59,6 +66,7 @@ public final class CarLaunchParamsModifier implements LaunchParamsController.Lau
     @GuardedBy("mLock")
     private int mCurrentDriverUser = UserHandle.USER_SYSTEM;
 
+    // TODO: Switch from tracking displays to tracking display areas instead
     /**
      * This one is for holding all passenger (=profile user) displays which are mostly static unless
      * displays are added / removed. Note that {@link #mDisplayToProfileUserMapping} can be empty
@@ -74,6 +82,12 @@ public final class CarLaunchParamsModifier implements LaunchParamsController.Lau
     /** key: profile user id, value: display id */
     @GuardedBy("mLock")
     private final SparseIntArray mDefaultDisplayForProfileUser = new SparseIntArray();
+
+    @GuardedBy("mLock")
+    private boolean mIsSourcePreferred;
+
+    @GuardedBy("mLock")
+    private List<ComponentName> mSourcePreferredComponents;
 
 
     @VisibleForTesting
@@ -117,13 +131,32 @@ public final class CarLaunchParamsModifier implements LaunchParamsController.Lau
      * are ready.
      */
     public void init() {
-        ActivityTaskManagerService service =
-                (ActivityTaskManagerService) ActivityTaskManager.getService();
-        LaunchParamsController controller = service.mStackSupervisor.getLaunchParamsController();
+        mAtm = (ActivityTaskManagerService) ActivityTaskManager.getService();
+        LaunchParamsController controller = mAtm.mStackSupervisor.getLaunchParamsController();
         controller.registerModifier(this);
         mDisplayManager = mContext.getSystemService(DisplayManager.class);
         mDisplayManager.registerDisplayListener(mDisplayListener,
                 new Handler(Looper.getMainLooper()));
+    }
+
+    /**
+     * Sets sourcePreferred configuration. When sourcePreferred is enabled and there is no pre-
+     * assigned display for the Activity, CarLauncherParamsModifier will launch the Activity in
+     * the display of the source. When sourcePreferredComponents isn't null the sourcePreferred
+     * is applied for the sourcePreferredComponents only.
+     *
+     * @param enableSourcePreferred whether to enable sourcePreferred mode
+     * @param sourcePreferredComponents null for all components, or the list of components to apply
+     */
+    public void setSourcePreferredComponents(boolean enableSourcePreferred,
+            @Nullable List<ComponentName> sourcePreferredComponents) {
+        synchronized (mLock) {
+            mIsSourcePreferred = enableSourcePreferred;
+            mSourcePreferredComponents = sourcePreferredComponents;
+            if (mSourcePreferredComponents != null) {
+                Collections.sort(mSourcePreferredComponents);
+            }
+        }
     }
 
     /** Notifies user switching. */
@@ -162,6 +195,10 @@ public final class CarLaunchParamsModifier implements LaunchParamsController.Lau
      * for the given displays.
      */
     public void setDisplayWhitelistForUser(int userId, int[] displayIds) {
+        if (DBG) {
+            Slog.d(TAG, "setDisplayWhitelistForUser userId:" + userId
+                    + " displays:" + displayIds);
+        }
         synchronized (mLock) {
             for (int displayId : displayIds) {
                 if (!mPassengerDisplays.contains(displayId)) {
@@ -196,6 +233,9 @@ public final class CarLaunchParamsModifier implements LaunchParamsController.Lau
      * for any non-driver user if there is no display assigned for the user. </p>
      */
     public void setPassengerDisplays(int[] displayIdsForPassenger) {
+        if (DBG) {
+            Slog.d(TAG, "setPassengerDisplays displays:" + displayIdsForPassenger);
+        }
         synchronized (mLock) {
             for (int id : displayIdsForPassenger) {
                 mPassengerDisplays.remove(Integer.valueOf(id));
@@ -238,69 +278,116 @@ public final class CarLaunchParamsModifier implements LaunchParamsController.Lau
             Slog.w(TAG, "onCalculate, cannot decide user");
             return RESULT_SKIP;
         }
-        final int originalDisplayId = currentParams.mPreferredDisplayId;
-        int newDisplayId = currentParams.mPreferredDisplayId;
+        // DisplayArea where user wants to launch the Activity.
+        TaskDisplayArea originalDisplayArea = currentParams.mPreferredTaskDisplayArea;
+        // DisplayArea where CarLaunchParamsModifier targets to launch the Activity.
+        TaskDisplayArea targetDisplayArea = null;
+        if (DBG) {
+            Slog.d(TAG, "onCalculate, userId:" + userId
+                    + " original displayArea:" + originalDisplayArea
+                    + " ActivityOptions:" + options);
+        }
+        // If originalDisplayArea is set, respect that before ActivityOptions check.
+        if (originalDisplayArea == null) {
+            if (options != null) {
+                WindowContainerToken daToken = options.getLaunchTaskDisplayArea();
+                if (daToken != null) {
+                    originalDisplayArea = (TaskDisplayArea) WindowContainer.fromBinder(
+                            daToken.asBinder());
+                } else {
+                    int originalDisplayId = options.getLaunchDisplayId();
+                    if (originalDisplayId != Display.INVALID_DISPLAY) {
+                        originalDisplayArea = getDefaultTaskDisplayAreaOnDisplay(originalDisplayId);
+                    }
+                }
+            }
+        }
+        decision:
         synchronized (mLock) {
+            if (originalDisplayArea == null  // No specified DisplayArea to launch the Activity
+                    && mIsSourcePreferred && source != null
+                    && (mSourcePreferredComponents == null || Collections.binarySearch(
+                            mSourcePreferredComponents, activity.info.getComponentName()) >= 0)) {
+                targetDisplayArea = source.noDisplay ? source.mHandoverTaskDisplayArea
+                        : source.getDisplayArea();
+            }
             if (userId == mCurrentDriverUser) {
-                // Do not touch, always allow.
-                return RESULT_SKIP;
+                // Respect the existing DisplayArea.
+                break decision;
             }
             if (userId == UserHandle.USER_SYSTEM) {
                 // This will be only allowed if it has FLAG_SHOW_FOR_ALL_USERS.
                 // The flag is not immediately accessible here so skip the check.
                 // But other WM policy will enforce it.
-                return RESULT_SKIP;
+                break decision;
             }
+            // Now user is a passenger.
             if (mPassengerDisplays.isEmpty()) {
                 // No displays for passengers. This could be old user and do not do anything.
-                return RESULT_SKIP;
+                break decision;
             }
-            Display display = mDisplayManager.getDisplay(originalDisplayId);
-            // This check is only for preventing NPE. AMS / WMS is supposed to handle the removed
-            // display case properly.
-            if (display == null) {
-                return RESULT_SKIP;
+            if (targetDisplayArea == null) {
+                if (originalDisplayArea != null) {
+                    targetDisplayArea = originalDisplayArea;
+                } else {
+                    targetDisplayArea = getDefaultTaskDisplayAreaOnDisplay(Display.DEFAULT_DISPLAY);
+                }
             }
+            Display display = targetDisplayArea.mDisplayContent.getDisplay();
             if ((display.getFlags() & Display.FLAG_PRIVATE) != 0) {
                 // private display should follow its own restriction rule.
-                return RESULT_SKIP;
+                break decision;
             }
             if (display.getType() == Display.TYPE_VIRTUAL) {
                 // TODO(b/132903422) : We need to update this after the bug is resolved.
                 // For now, don't change anything.
-                return RESULT_SKIP;
+                break decision;
             }
-            int userForDisplay = mDisplayToProfileUserMapping.get(originalDisplayId,
+            int userForDisplay = mDisplayToProfileUserMapping.get(display.getDisplayId(),
                     UserHandle.USER_NULL);
             if (userForDisplay == userId) {
-                return RESULT_SKIP;
+                break decision;
             }
-            newDisplayId = getAlternativeDisplayForPassengerLocked(userId, originalDisplayId);
+            targetDisplayArea = getAlternativeDisplayAreaForPassengerLocked(
+                    userId, targetDisplayArea);
         }
-        if (originalDisplayId != newDisplayId) {
-            Slog.w(TAG, "Launching passenger to not allowed displays, user:"
-                    + userId + " requested display:" + originalDisplayId
-                    +" changed display:" + newDisplayId);
-            outParams.mPreferredDisplayId = newDisplayId;
-            return RESULT_CONTINUE;
+        if (targetDisplayArea != null && originalDisplayArea != targetDisplayArea) {
+            Slog.i(TAG, "Changed launching display, user:" + userId
+                    + " requested display area:" + originalDisplayArea
+                    + " target display area:" + targetDisplayArea);
+            outParams.mPreferredTaskDisplayArea = targetDisplayArea;
+            return RESULT_DONE;
         } else {
             return RESULT_SKIP;
         }
     }
 
-    private int getAlternativeDisplayForPassengerLocked(int userId, int originalDisplayId) {
+    @Nullable
+    private TaskDisplayArea getAlternativeDisplayAreaForPassengerLocked(int userId,
+            TaskDisplayArea originalDisplayArea) {
         int displayId = mDefaultDisplayForProfileUser.get(userId, Display.INVALID_DISPLAY);
         if (displayId != Display.INVALID_DISPLAY) {
-            return displayId;
+            return getDefaultTaskDisplayAreaOnDisplay(displayId);
         }
-        // return the 1st passenger display if it exists
+        // return the 1st passenger display area if it exists
         if (!mPassengerDisplays.isEmpty()) {
-            Slog.w(TAG, "No default display for user:" + userId
-                    + " reassign to 1st passenger display");
-            return mPassengerDisplays.get(0);
+            Slog.w(TAG, "No default display area for user:" + userId
+                    + " reassign to 1st passenger display area");
+            return getDefaultTaskDisplayAreaOnDisplay(mPassengerDisplays.get(0));
         }
         Slog.w(TAG, "No default display for user:" + userId
-                + " and no passenger display, keep the requested display:" + originalDisplayId);
-        return originalDisplayId;
+                + " and no passenger display, keep the requested display area:"
+                + originalDisplayArea);
+        return originalDisplayArea;
+    }
+
+    @VisibleForTesting
+    @Nullable
+    TaskDisplayArea getDefaultTaskDisplayAreaOnDisplay(int displayId) {
+        DisplayContent dc = mAtm.mRootWindowContainer.getDisplayContentOrCreate(displayId);
+        if (dc == null) {
+            return null;
+        }
+        return dc.getDefaultTaskDisplayArea();
     }
 }
