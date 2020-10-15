@@ -17,7 +17,7 @@
 
 package com.android.internal.car;
 
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_SWITCHING;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_SWITCHING;
 
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.never;

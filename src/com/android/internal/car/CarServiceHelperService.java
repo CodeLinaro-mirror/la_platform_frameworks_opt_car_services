@@ -16,14 +16,14 @@
 
 package com.android.internal.car;
 
-import static com.android.car.internal.CommonConstants.CAR_SERVICE_INTERFACE;
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STARTING;
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPED;
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPING;
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_SWITCHING;
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKED;
-import static com.android.car.internal.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKING;
 import static com.android.car.internal.SystemConstants.ICAR_SYSTEM_SERVER_CLIENT;
+import static com.android.car.internal.common.CommonConstants.CAR_SERVICE_INTERFACE;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STARTING;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPED;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPING;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_SWITCHING;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKED;
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_UNLOCKING;
 import static com.android.internal.util.function.pooled.PooledLambda.obtainMessage;
 
 import android.annotation.NonNull;
@@ -33,7 +33,6 @@ import android.app.admin.DevicePolicyManager;
 import android.automotive.watchdog.ICarWatchdogMonitor;
 import android.automotive.watchdog.PowerCycle;
 import android.automotive.watchdog.StateType;
-import android.car.userlib.CarUserManagerHelper;
 import android.car.watchdoglib.CarWatchdogDaemonHelper;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -60,10 +59,11 @@ import android.util.EventLog;
 import android.util.Slog;
 import android.util.TimeUtils;
 
-import com.android.car.internal.EventLogTags;
 import com.android.car.internal.ICarServiceHelper;
 import com.android.car.internal.ICarSystemServerClient;
-import com.android.car.internal.UserHelperLite;
+import com.android.car.internal.common.CommonConstants.UserLifecycleEventType;
+import com.android.car.internal.common.EventLogTags;
+import com.android.car.internal.common.UserHelperLite;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.os.IResultReceiver;
@@ -132,7 +132,6 @@ public class CarServiceHelperService extends SystemService {
     @GuardedBy("mLock")
     private boolean mSystemBootCompleted;
 
-    private final CarUserManagerHelper mCarUserManagerHelper;
     private final UserManager mUserManager;
     private final CarLaunchParamsModifier mCarLaunchParamsModifier;
 
@@ -199,7 +198,6 @@ public class CarServiceHelperService extends SystemService {
 
     public CarServiceHelperService(Context context) {
         this(context,
-                new CarUserManagerHelper(context),
                 UserManager.get(context),
                 new CarLaunchParamsModifier(context),
                 new CarWatchdogDaemonHelper(TAG),
@@ -210,7 +208,6 @@ public class CarServiceHelperService extends SystemService {
     @VisibleForTesting
     CarServiceHelperService(
             Context context,
-            CarUserManagerHelper userManagerHelper,
             UserManager userManager,
             CarLaunchParamsModifier carLaunchParamsModifier,
             CarWatchdogDaemonHelper carWatchdogDaemonHelper,
@@ -219,7 +216,6 @@ public class CarServiceHelperService extends SystemService {
         mContext = context;
         mHandlerThread.start();
         mHandler = new Handler(mHandlerThread.getLooper());
-        mCarUserManagerHelper = userManagerHelper;
         mUserManager = userManager;
         mCarLaunchParamsModifier = carLaunchParamsModifier;
         mCarWatchdogDaemonHelper = carWatchdogDaemonHelper;
@@ -362,7 +358,7 @@ public class CarServiceHelperService extends SystemService {
         System.loadLibrary("car-framework-service-jni");
     }
 
-    private boolean isPreCreated(@NonNull TargetUser user, int eventType) {
+    private boolean isPreCreated(@NonNull TargetUser user, @UserLifecycleEventType int eventType) {
         if (!user.isPreCreated()) return false;
 
         if (DBG) {
@@ -443,7 +439,8 @@ public class CarServiceHelperService extends SystemService {
         }
     }
 
-    private void sendUserLifecycleEvent(int eventType, @NonNull TargetUser user) {
+    private void sendUserLifecycleEvent(@UserLifecycleEventType int eventType,
+            @NonNull TargetUser user) {
         mCarServiceProxy.sendUserLifecycleEvent(eventType, /* from= */ null, user);
     }
 
