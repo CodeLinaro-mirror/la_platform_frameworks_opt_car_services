@@ -30,6 +30,9 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.UserIdInt;
 import android.app.admin.DevicePolicyManager;
+import android.app.admin.DevicePolicyManager.DevicePolicyOperation;
+import android.app.admin.DevicePolicySafetyChecker;
+import android.app.admin.UnsafeStateException;
 import android.automotive.watchdog.ICarWatchdogMonitor;
 import android.automotive.watchdog.PowerCycle;
 import android.automotive.watchdog.StateType;
@@ -53,7 +56,6 @@ import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.Trace;
 import android.os.UserHandle;
-import android.os.UserManager;
 import android.util.EventLog;
 import android.util.IndentingPrintWriter;
 import android.util.Slog;
@@ -93,7 +95,8 @@ import java.util.concurrent.Executors;
  * System service side companion service for CarService. Starts car service and provide necessary
  * API for CarService. Only for car product.
  */
-public class CarServiceHelperService extends SystemService implements Dumpable {
+public class CarServiceHelperService extends SystemService
+        implements Dumpable, DevicePolicySafetyChecker {
 
     @VisibleForTesting
     static final String DUMP_SERVICE = "car_service_server";
@@ -131,7 +134,6 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
     @GuardedBy("mLock")
     private boolean mSystemBootCompleted;
 
-    private final UserManager mUserManager;
     private final CarLaunchParamsModifier mCarLaunchParamsModifier;
 
     private final Handler mHandler;
@@ -195,9 +197,11 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
         }
     };
 
+    private final CarDevicePolicySafetyChecker mCarDevicePolicySafetyChecker =
+            new CarDevicePolicySafetyChecker();
+
     public CarServiceHelperService(Context context) {
         this(context,
-                UserManager.get(context),
                 new CarLaunchParamsModifier(context),
                 new CarWatchdogDaemonHelper(TAG),
                 null
@@ -207,7 +211,6 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
     @VisibleForTesting
     CarServiceHelperService(
             Context context,
-            UserManager userManager,
             CarLaunchParamsModifier carLaunchParamsModifier,
             CarWatchdogDaemonHelper carWatchdogDaemonHelper,
             CarServiceProxy carServiceOperationManager) {
@@ -215,7 +218,6 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
         mContext = context;
         mHandlerThread.start();
         mHandler = new Handler(mHandlerThread.getLooper());
-        mUserManager = userManager;
         mCarLaunchParamsModifier = carLaunchParamsModifier;
         mCarWatchdogDaemonHelper = carWatchdogDaemonHelper;
         mCarServiceProxy =
@@ -277,6 +279,7 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
             TimeUtils.formatDuration(mFirstUnlockedUserDuration, pw); pw.println();
             pw.printf("Queued tasks: %d\n", mProcessTerminator.mQueuedTask);
             mCarServiceProxy.dump(pw);
+            mCarDevicePolicySafetyChecker.dump(pw);
             return;
         }
 
@@ -284,6 +287,7 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
             mCarServiceProxy.dumpUserMetrics(pw);
             return;
         }
+
         pw.printf("Invalid args: %s\n", Arrays.toString(args));
     }
 
@@ -358,6 +362,16 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
                 from, to);
         int userId = to.getUserIdentifier();
         mCarLaunchParamsModifier.handleCurrentUserSwitching(userId);
+    }
+
+    @Override // from SafetyChecker
+    public boolean isDevicePolicyOperationSafe(@DevicePolicyOperation int operation) {
+        return mCarDevicePolicySafetyChecker.isDevicePolicyOperationSafe(operation);
+    }
+
+    @Override
+    public UnsafeStateException newUnsafeStateException(@DevicePolicyOperation int operation) {
+        return mCarDevicePolicySafetyChecker.newUnsafeStateException(operation);
     }
 
     @VisibleForTesting
@@ -564,6 +578,8 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
 
     private static native int nativeForceSuspend(int timeoutMs);
 
+    // TODO: it's missing unit tests (for example, to make sure that
+    // when its setSafetyMode() is called, mCarDevicePolicySafetyChecker is updated).
     private class ICarServiceHelperImpl extends ICarServiceHelper.Stub {
         /**
          * Force device to suspend
@@ -596,6 +612,11 @@ public class CarServiceHelperService extends SystemService implements Dumpable {
                 @Nullable List<ComponentName> sourcePreferredComponents) {
             mCarLaunchParamsModifier.setSourcePreferredComponents(
                     enableSourcePreferred, sourcePreferredComponents);
+        }
+
+        @Override
+        public void setSafetyMode(boolean safe) {
+            mCarDevicePolicySafetyChecker.setSafe(safe);
         }
     }
 
