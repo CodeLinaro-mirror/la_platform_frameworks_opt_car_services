@@ -15,15 +15,21 @@
  */
 package com.android.internal.car;
 
+import static android.app.admin.DevicePolicyManager.OPERATION_CLEAR_APPLICATION_USER_DATA;
 import static android.app.admin.DevicePolicyManager.OPERATION_LOGOUT_USER;
 import static android.app.admin.DevicePolicyManager.OPERATION_REBOOT;
+import static android.app.admin.DevicePolicyManager.OPERATION_REQUEST_BUGREPORT;
+import static android.app.admin.DevicePolicyManager.OPERATION_SET_APPLICATION_HIDDEN;
+import static android.app.admin.DevicePolicyManager.OPERATION_SET_APPLICATION_RESTRICTIONS;
+import static android.app.admin.DevicePolicyManager.OPERATION_SET_KEYGUARD_DISABLED;
+import static android.app.admin.DevicePolicyManager.OPERATION_SET_PACKAGES_SUSPENDED;
+import static android.app.admin.DevicePolicyManager.OPERATION_SET_STATUS_BAR_DISABLED;
+import static android.app.admin.DevicePolicyManager.OPERATION_SET_SYSTEM_SETTING;
 import static android.app.admin.DevicePolicyManager.OPERATION_SWITCH_USER;
-import static android.app.admin.DevicePolicyManager.OPERATION_WIPE_DATA;
 import static android.app.admin.DevicePolicyManager.operationToString;
 
 import android.annotation.NonNull;
 import android.app.admin.DevicePolicyManager.DevicePolicyOperation;
-import android.app.admin.DevicePolicySafetyChecker;
 import android.util.IndentingPrintWriter;
 import android.util.Slog;
 
@@ -34,23 +40,29 @@ import java.util.stream.Collectors;
 /**
  * Integrates {@link android.app.admin.DevicePolicyManager} operations with car UX restrictions.
  */
-final class CarDevicePolicySafetyChecker implements DevicePolicySafetyChecker {
+final class CarDevicePolicySafetyChecker {
 
     private static final String TAG = CarDevicePolicySafetyChecker.class.getSimpleName();
 
     private static final boolean DEBUG = false;
 
     private static final int[] UNSAFE_OPERATIONS = new int[] {
+            OPERATION_CLEAR_APPLICATION_USER_DATA,
             OPERATION_LOGOUT_USER,
             OPERATION_REBOOT,
-            OPERATION_SWITCH_USER,
-            OPERATION_WIPE_DATA
+            OPERATION_REQUEST_BUGREPORT,
+            OPERATION_SET_APPLICATION_HIDDEN,
+            OPERATION_SET_APPLICATION_RESTRICTIONS,
+            OPERATION_SET_KEYGUARD_DISABLED,
+            OPERATION_SET_PACKAGES_SUSPENDED,
+            OPERATION_SET_STATUS_BAR_DISABLED,
+            OPERATION_SET_SYSTEM_SETTING,
+            OPERATION_SWITCH_USER
     };
 
     private final AtomicBoolean mSafe = new AtomicBoolean(true);
 
-    @Override
-    public boolean isDevicePolicyOperationSafe(@DevicePolicyOperation int operation) {
+    boolean isDevicePolicyOperationSafe(@DevicePolicyOperation int operation) {
         boolean safe = true;
         boolean globalSafe = mSafe.get();
         if (!globalSafe) {
