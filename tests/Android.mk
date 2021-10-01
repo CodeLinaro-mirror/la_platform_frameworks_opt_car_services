@@ -23,17 +23,16 @@ LOCAL_MODULE_PATH := $(TARGET_OUT_DATA_APPS)
 LOCAL_PROGUARD_ENABLED := disabled
 
 LOCAL_JAVA_LIBRARIES += \
+    android.car \
     android.test.runner \
     android.test.base \
     android.hardware.automotive.vehicle-V2.0-java \
-    com.android.car.internal.common
 
 LOCAL_STATIC_JAVA_LIBRARIES := \
     android.car.test.utils \
     android.car.watchdoglib \
     androidx.test.ext.junit \
     androidx.test.rules \
-    com.android.car.internal.system \
     mockito-target-extended-minus-junit4 \
     services.core \
     testng \
