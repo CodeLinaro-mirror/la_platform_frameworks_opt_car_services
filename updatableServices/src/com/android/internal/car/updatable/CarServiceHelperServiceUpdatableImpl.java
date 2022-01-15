@@ -54,7 +54,6 @@ import java.util.function.BiConsumer;
 /**
  * Implementation of the abstract class CarServiceHelperUpdatable
  */
-// TODO(b/190458000): Add unit test
 public final class CarServiceHelperServiceUpdatableImpl
         implements CarServiceHelperServiceUpdatable, Executor {
 
@@ -243,10 +242,6 @@ public final class CarServiceHelperServiceUpdatableImpl
     }
 
     private final class ICarServiceHelperImpl extends ICarServiceHelper.Stub {
-        @Override
-        public int forceSuspend(int timeoutMs) {
-            return mCarServiceHelperInterface.forceSuspend(timeoutMs);
-        }
 
         @Override
         public void setDisplayAllowlistForUser(int userId, int[] displayIds) {
@@ -279,6 +274,11 @@ public final class CarServiceHelperServiceUpdatableImpl
         @Override
         public UserHandle createUserEvenWhenDisallowed(String name, String userType, int flags) {
             return mCarServiceHelperInterface.createUserEvenWhenDisallowed(name, userType, flags);
+        }
+
+        @Override
+        public void sendInitialUser(UserHandle user) {
+            mCarServiceProxy.saveInitialUser(user);
         }
     }
 
