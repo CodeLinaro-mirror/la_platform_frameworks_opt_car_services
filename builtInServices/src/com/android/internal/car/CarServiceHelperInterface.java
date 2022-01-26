@@ -31,11 +31,6 @@ import java.util.List;
 @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
 public interface CarServiceHelperInterface {
 
-    /**
-     * Forces device to suspend
-     */
-    int forceSuspend(int timeoutMs);
-
     // TODO(b/190458000): Investigate if it is possible to move policy to updatable.
     /**
      * Sets display allow list for user
@@ -54,6 +49,12 @@ public interface CarServiceHelperInterface {
      */
     void setSourcePreferredComponents(boolean enableSourcePreferred,
             @Nullable List<ComponentName> sourcePreferredComponents);
+
+    /**
+     * Designates the given {@code activity} to be launched in {@code TaskDisplayArea} of
+     * {@code featureId} in the display of {@code displayId}.
+     */
+    int setPersistentActivity(ComponentName activity, int displayId, int featureId);
 
     /**
      * Sets safety mode

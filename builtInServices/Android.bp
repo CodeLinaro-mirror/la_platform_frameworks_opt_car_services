@@ -4,14 +4,12 @@ package {
 
 java_sdk_library {
     name: "car-frameworks-service",
-    installable: true,
     libs: [
         "services",
         "android.car",
         "android.car.builtin",  // Will remove once split is complete
         "android.hardware.automotive.vehicle-V2.0-java",
     ],
-    required: ["libcar-framework-service-jni"],
     srcs: [
         "src/**/*.java",
     ],
@@ -22,6 +20,12 @@ java_sdk_library {
     api_lint: {
         enabled: true,
     },
+
+    min_sdk_version: "31",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.car.framework"
+    ],
 
     unsafe_ignore_missing_latest_api: true,
 
@@ -36,17 +40,4 @@ java_sdk_library {
         enabled: true,
         sdk_version: "module_current",
     },
-}
-
-cc_library_shared {
-    name: "libcar-framework-service-jni",
-    shared_libs: [
-        "libandroid_runtime",
-        "libhidlbase",
-        "liblog",
-        "libnativehelper",
-        "libsuspend",
-        "libutils",
-    ],
-    srcs: ["src/jni/com_android_internal_car_CarServiceHelperService.cpp"],
 }

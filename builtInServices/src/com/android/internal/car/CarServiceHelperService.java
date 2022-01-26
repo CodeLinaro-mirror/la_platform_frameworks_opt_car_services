@@ -275,7 +275,6 @@ public class CarServiceHelperService extends SystemService
         mCarWatchdogDaemonHelper.addOnConnectionChangeListener(mConnectionListener);
         mCarWatchdogDaemonHelper.connect();
         mCarServiceHelperServiceUpdatable.onStart();
-        loadNativeLibrary();
     }
 
     @Override
@@ -420,11 +419,6 @@ public class CarServiceHelperService extends SystemService
         }
     }
 
-    @VisibleForTesting
-    void loadNativeLibrary() {
-        System.loadLibrary("car-framework-service-jni");
-    }
-
     private boolean isPreCreated(@NonNull TargetUser user, @UserLifecycleEventType int eventType) {
         if (!user.isPreCreated()) return false;
 
@@ -507,6 +501,13 @@ public class CarServiceHelperService extends SystemService
     private void registerMonitorToWatchdogDaemon() {
         try {
             mCarWatchdogDaemonHelper.registerMonitor(mCarWatchdogMonitor);
+            synchronized (mLock) {
+                if (!mSystemBootCompleted) {
+                    return;
+                }
+            }
+            mCarWatchdogDaemonHelper.notifySystemStateChange(
+                    StateType.BOOT_PHASE, SystemService.PHASE_BOOT_COMPLETED, /* arg2= */ 0);
         } catch (RemoteException | RuntimeException e) {
             Slogf.w(TAG, "Cannot register to car watchdog daemon: %s", e);
         }
@@ -539,24 +540,6 @@ public class CarServiceHelperService extends SystemService
         }
     }
 
-    private static native int nativeForceSuspend(int timeoutMs);
-
-    // TODO(b/173664653): it's missing unit tests (for example, to make sure that
-    // when its setSafetyMode() is called, mCarDevicePolicySafetyChecker is updated).
-    @Override
-    public int forceSuspend(int timeoutMs) {
-        int retVal;
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.DEVICE_POWER,
-                "forceSuspend");
-        final long ident = Binder.clearCallingIdentity();
-        try {
-            retVal = nativeForceSuspend(timeoutMs);
-        } finally {
-            Binder.restoreCallingIdentity(ident);
-        }
-        return retVal;
-    }
-
     @Override
     public void setDisplayAllowlistForUser(@NonNull UserHandle user, int[] displayIds) {
         mCarLaunchParamsModifier.setDisplayAllowListForUser(user.getIdentifier(), displayIds);
@@ -572,6 +555,11 @@ public class CarServiceHelperService extends SystemService
             @Nullable List<ComponentName> sourcePreferredComponents) {
         mCarLaunchParamsModifier.setSourcePreferredComponents(
                 enableSourcePreferred, sourcePreferredComponents);
+    }
+
+    @Override
+    public int setPersistentActivity(ComponentName activity, int displayId, int featureId) {
+        return mCarLaunchParamsModifier.setPersistentActivity(activity, displayId, featureId);
     }
 
     @Override
