@@ -18,11 +18,9 @@ package com.android.internal.car;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.UserIdInt;
-import android.content.ComponentName;
 import android.os.UserHandle;
 
-import java.util.List;
+import java.io.File;
 
 /**
  * Interface implemented by CarServiceHelperService.
@@ -30,31 +28,6 @@ import java.util.List;
  */
 @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
 public interface CarServiceHelperInterface {
-
-    // TODO(b/190458000): Investigate if it is possible to move policy to updatable.
-    /**
-     * Sets display allow list for user
-     */
-    void setDisplayAllowlistForUser(@NonNull UserHandle user, int[] displayIds);
-
-    // TODO(b/190458000): Investigate if it is possible to move policy to updatable.
-    /**
-     * Sets passenger displays
-     */
-    void setPassengerDisplays(int[] displayIdsForPassenger);
-
-    // TODO(b/190458000): Investigate if it is possible to move policy to updatable.
-    /**
-     * Sets source preferred components
-     */
-    void setSourcePreferredComponents(boolean enableSourcePreferred,
-            @Nullable List<ComponentName> sourcePreferredComponents);
-
-    /**
-     * Designates the given {@code activity} to be launched in {@code TaskDisplayArea} of
-     * {@code featureId} in the display of {@code displayId}.
-     */
-    int setPersistentActivity(ComponentName activity, int displayId, int featureId);
 
     /**
      * Sets safety mode
@@ -68,9 +41,9 @@ public interface CarServiceHelperInterface {
     UserHandle createUserEvenWhenDisallowed(@Nullable String name, @NonNull String userType,
             int flags);
 
-    // TODO(b/190458000): Investigate if it can be removed.
     /**
-     * Dumos service stack
+     * Dumps service stacks
      */
-    void dumpServiceStacks();
+    @Nullable
+    File dumpServiceStacks();
 }
