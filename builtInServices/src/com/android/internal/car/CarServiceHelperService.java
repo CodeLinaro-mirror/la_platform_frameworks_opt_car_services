@@ -25,7 +25,6 @@ import static com.android.internal.util.function.pooled.PooledLambda.obtainMessa
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.annotation.UserIdInt;
 import android.app.admin.DevicePolicyManager;
 import android.app.admin.DevicePolicyManager.DevicePolicyOperation;
 import android.app.admin.DevicePolicyManager.OperationSafetyReason;
@@ -33,18 +32,14 @@ import android.app.admin.DevicePolicySafetyChecker;
 import android.automotive.watchdog.internal.ICarWatchdogMonitor;
 import android.automotive.watchdog.internal.PowerCycle;
 import android.automotive.watchdog.internal.StateType;
-import android.car.builtin.os.UserManagerHelper;
 import android.car.builtin.util.EventLogHelper;
 import android.car.watchdoglib.CarWatchdogDaemonHelper;
 import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.UserInfo;
 import android.hidl.manager.V1_0.IServiceManager;
-import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
@@ -70,6 +65,7 @@ import com.android.server.pm.UserManagerInternal.UserLifecycleListener;
 import com.android.server.utils.Slogf;
 import com.android.server.utils.TimingsTraceAndSlog;
 import com.android.server.wm.CarLaunchParamsModifier;
+import com.android.server.wm.CarLaunchParamsModifierInterface;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -77,7 +73,6 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.lang.ref.WeakReference;
-import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -97,7 +92,8 @@ import java.util.concurrent.Executors;
 public class CarServiceHelperService extends SystemService
         implements Dumpable, DevicePolicySafetyChecker, CarServiceHelperInterface {
 
-    private static final String TAG = "CarServiceHelper";
+    @VisibleForTesting
+    static final String TAG = "CarServiceHelper";
 
     // TODO(b/154033860): STOPSHIP if they're still true
     private static final boolean DBG = true;
@@ -198,8 +194,10 @@ public class CarServiceHelperService extends SystemService
             if (carServiceHelperServiceUpdatable == null) {
                 mCarServiceHelperServiceUpdatable = (CarServiceHelperServiceUpdatable) Class
                         .forName(CSHS_UPDATABLE_CLASSNAME_STRING)
-                        .getConstructor(Context.class, CarServiceHelperInterface.class)
-                        .newInstance(mContext, this);
+                        .getConstructor(Context.class, CarServiceHelperInterface.class,
+                                CarLaunchParamsModifierInterface.class)
+                        .newInstance(mContext, this,
+                                mCarLaunchParamsModifier.getBuiltinInterface());
                 Slogf.d(TAG, "CarServiceHelperServiceUpdatable created via reflection.");
             } else {
                 mCarServiceHelperServiceUpdatable = carServiceHelperServiceUpdatable;
@@ -214,6 +212,8 @@ public class CarServiceHelperService extends SystemService
             Process.killProcess(Process.myPid());
             System.exit(10);
         }
+        mCarLaunchParamsModifier.setUpdatable(
+                mCarServiceHelperServiceUpdatable.getCarLaunchParamsModifierUpdatable());
 
         UserManagerInternal umi = LocalServices.getService(UserManagerInternal.class);
         if (umi != null) {
@@ -307,6 +307,12 @@ public class CarServiceHelperService extends SystemService
                     DevicePolicyManager.operationSafetyReasonToString(reason));
             return;
         }
+
+        if ("--user-metrics-only".equals(args[0]) || "--dump-service-stacks".equals(args[0])) {
+            mCarServiceHelperServiceUpdatable.dump(pw, args);
+            return;
+        }
+
         pw.printf("Invalid args: %s\n", Arrays.toString(args));
     }
 
@@ -351,6 +357,8 @@ public class CarServiceHelperService extends SystemService
 
         mCarServiceHelperServiceUpdatable.sendUserLifecycleEvent(USER_LIFECYCLE_EVENT_TYPE_STARTING,
                 /* userFrom= */ null, user.getUserHandle());
+        int userId = user.getUserIdentifier();
+        mCarLaunchParamsModifier.handleUserStarting(userId);
     }
 
     @Override
@@ -485,11 +493,13 @@ public class CarServiceHelperService extends SystemService
      * Dumps service stack
      */
     // Borrowed from Watchdog.java.  Create an ANR file from the call stacks.
-    public void dumpServiceStacks() {
+    @Override
+    @Nullable
+    public File dumpServiceStacks() {
         ArrayList<Integer> pids = new ArrayList<>();
         pids.add(Process.myPid());
 
-        ActivityManagerService.dumpStackTraces(
+        return ActivityManagerService.dumpStackTraces(
                 pids, null, null, getInterestingNativePids(), null);
     }
 
@@ -537,28 +547,6 @@ public class CarServiceHelperService extends SystemService
             Slogf.w(TAG, "Cannot read %s", filename);
             return unknownProcessName;
         }
-    }
-
-    @Override
-    public void setDisplayAllowlistForUser(@NonNull UserHandle user, int[] displayIds) {
-        mCarLaunchParamsModifier.setDisplayAllowListForUser(user.getIdentifier(), displayIds);
-    }
-
-    @Override
-    public void setPassengerDisplays(int[] displayIdsForPassenger) {
-        mCarLaunchParamsModifier.setPassengerDisplays(displayIdsForPassenger);
-    }
-
-    @Override
-    public void setSourcePreferredComponents(boolean enableSourcePreferred,
-            @Nullable List<ComponentName> sourcePreferredComponents) {
-        mCarLaunchParamsModifier.setSourcePreferredComponents(
-                enableSourcePreferred, sourcePreferredComponents);
-    }
-
-    @Override
-    public int setPersistentActivity(ComponentName activity, int displayId, int featureId) {
-        return mCarLaunchParamsModifier.setPersistentActivity(activity, displayId, featureId);
     }
 
     @Override
