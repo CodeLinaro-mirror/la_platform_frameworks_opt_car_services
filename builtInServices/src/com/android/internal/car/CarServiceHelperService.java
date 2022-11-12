@@ -15,6 +15,7 @@
  */
 package com.android.internal.car;
 
+import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_CREATED;
 import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_POST_UNLOCKED;
 import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STARTING;
 import static com.android.car.internal.common.CommonConstants.USER_LIFECYCLE_EVENT_TYPE_STOPPED;
@@ -205,7 +206,11 @@ public class CarServiceHelperService extends SystemService
                 @Override
                 public void onUserCreated(UserInfo user, Object token) {
                     if (DBG) Slogf.d(TAG, "onUserCreated(): %s", user.toFullString());
+                    mCarServiceHelperServiceUpdatable.sendUserLifecycleEvent(
+                            USER_LIFECYCLE_EVENT_TYPE_CREATED, /* userFrom= */ null,
+                            user.getUserHandle());
                 }
+
                 @Override
                 public void onUserRemoved(UserInfo user) {
                     if (DBG) Slogf.d(TAG, "onUserRemoved(): $s", user.toFullString());
@@ -486,6 +491,16 @@ public class CarServiceHelperService extends SystemService
                 pids, /* processCpuTracker= */ null, /* lastPids= */ null,
                 getInterestingNativePids(), /* logExceptionCreatingFile= */ null,
                 /* subject= */ null, /* criticalEventSection= */ null);
+    }
+
+    @Override
+    public void setProcessGroup(int pid, int group) {
+        Process.setProcessGroup(pid, group);
+    }
+
+    @Override
+    public int getProcessGroup(int pid) {
+        return Process.getProcessGroup(pid);
     }
 
     private void handleClientsNotResponding(@NonNull List<ProcessIdentifier> processIdentifiers) {
