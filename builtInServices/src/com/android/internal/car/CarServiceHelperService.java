@@ -27,6 +27,7 @@ import static com.android.internal.util.function.pooled.PooledLambda.obtainMessa
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.ActivityManager;
 import android.app.admin.DevicePolicyManager;
 import android.app.admin.DevicePolicyManager.DevicePolicyOperation;
 import android.app.admin.DevicePolicyManager.OperationSafetyReason;
@@ -52,10 +53,10 @@ import android.system.OsConstants;
 import android.util.Dumpable;
 import android.util.TimeUtils;
 
-import com.android.car.internal.common.CommonConstants.UserLifecycleEventType;
 import com.android.car.internal.common.UserHelperLite;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.car.os.Util;
 import com.android.internal.os.IResultReceiver;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
@@ -82,6 +83,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -119,6 +121,11 @@ public class CarServiceHelperService extends SystemService
     private static final String PROC_PID_STAT_PATTERN =
             "(?<pid>[0-9]*)\\s\\((?<name>\\S+)\\)\\s\\S\\s(?:-?[0-9]*\\s){18}"
                     + "(?<startClockTicks>[0-9]*)\\s(?:-?[0-9]*\\s)*-?[0-9]*";
+
+    static  {
+        // Load this JNI before other classes are loaded.
+        System.loadLibrary("carservicehelperjni");
+    }
 
     private final Context mContext;
     private final Object mLock = new Object();
@@ -489,8 +496,9 @@ public class CarServiceHelperService extends SystemService
         // Use the long version used by Watchdog since the short version is removed by the compiler.
         return ActivityManagerService.dumpStackTraces(
                 pids, /* processCpuTracker= */ null, /* lastPids= */ null,
-                getInterestingNativePids(), /* logExceptionCreatingFile= */ null,
-                /* subject= */ null, /* criticalEventSection= */ null);
+                CompletableFuture.completedFuture(getInterestingNativePids()),
+                /* logExceptionCreatingFile= */ null, /* subject= */ null,
+                /* criticalEventSection= */ null, Runnable::run, /* latencyTracker= */ null);
     }
 
     @Override
@@ -501,6 +509,17 @@ public class CarServiceHelperService extends SystemService
     @Override
     public int getProcessGroup(int pid) {
         return Process.getProcessGroup(pid);
+    }
+
+    @Override
+    public boolean startUserInBackgroundOnSecondaryDisplay(int userId, int displayId) {
+        ActivityManager am = mContext.getSystemService(ActivityManager.class);
+        return am.startUserInBackgroundOnSecondaryDisplay(userId, displayId);
+    }
+
+    @Override
+    public void setProcessProfile(int pid, int uid, @NonNull String profile) {
+        Util.setProcessProfile(pid, uid, profile);
     }
 
     private void handleClientsNotResponding(@NonNull List<ProcessIdentifier> processIdentifiers) {
@@ -596,6 +615,26 @@ public class CarServiceHelperService extends SystemService
         }
     }
 
+    @Override
+    public int getDisplayAssignedToUser(int userId) {
+        UserManagerInternal umi = LocalServices.getService(UserManagerInternal.class);
+        int displayId = umi.getDisplayAssignedToUser(userId);
+        if (DBG) {
+            Slogf.d(TAG, "getDisplayAssignedToUser(%d): %d", userId, displayId);
+        }
+        return displayId;
+    }
+
+    @Override
+    public int getUserAssignedToDisplay(int displayId) {
+        UserManagerInternal umi = LocalServices.getService(UserManagerInternal.class);
+        int userId = umi.getUserAssignedToDisplay(displayId);
+        if (DBG) {
+            Slogf.d(TAG, "getUserAssignedToDisplay(%d): %d", displayId, userId);
+        }
+        return userId;
+    }
+
     private class ICarWatchdogMonitorImpl extends ICarWatchdogMonitor.Stub {
         private final WeakReference<CarServiceHelperService> mService;
 
@@ -683,7 +722,11 @@ public class CarServiceHelperService extends SystemService
             }
             nativePids.addAll(getInterestingNativePids());
             long startDumpTime = SystemClock.uptimeMillis();
-            ActivityManagerService.dumpStackTraces(javaPids, null, null, nativePids, null);
+            ActivityManagerService.dumpStackTraces(
+                    /* firstPids= */ javaPids, /* processCpuTracker= */ null, /* lastPids= */ null,
+                    /* nativePids= */ CompletableFuture.completedFuture(nativePids),
+                    /* logExceptionCreatingFile= */ null,
+                    /* auxiliaryTaskExecutor= */ Runnable::run, /* latencyTracker= */ null);
             long dumpTime = SystemClock.uptimeMillis() - startDumpTime;
             if (DBG) {
                 Slogf.d(TAG, "Dumping process took %dms", dumpTime);

@@ -18,9 +18,11 @@ package com.android.internal.car;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.car.annotation.AddedIn;
-import android.car.annotation.MinimumPlatformSdkVersion;
+import android.annotation.UserIdInt;
+import android.car.builtin.annotation.PlatformVersion;
 import android.os.UserHandle;
+
+import com.android.annotation.AddedIn;
 
 import java.io.File;
 
@@ -34,29 +36,49 @@ public interface CarServiceHelperInterface {
     /**
      * Sets safety mode
      */
-    @AddedIn(majorVersion = 33)
+    @AddedIn(PlatformVersion.TIRAMISU_0)
     void setSafetyMode(boolean safe);
 
     /**
      * Creates user even when disallowed
      */
     @Nullable
-    @AddedIn(majorVersion = 33)
+    @AddedIn(PlatformVersion.TIRAMISU_0)
     UserHandle createUserEvenWhenDisallowed(@Nullable String name, @NonNull String userType,
             int flags);
+
+    /**
+     * Gets the display assigned to the user.
+     */
+    @AddedIn(PlatformVersion.UPSIDE_DOWN_CAKE_0)
+    int getDisplayAssignedToUser(@UserIdInt int userId);
+
+    /**
+     * Gets the full user (i.e., not profile) assigned to the display.
+     */
+    @AddedIn(PlatformVersion.UPSIDE_DOWN_CAKE_0)
+    int getUserAssignedToDisplay(int displayId);
 
     /**
      * Dumps service stacks
      */
     @Nullable
-    @AddedIn(majorVersion = 33)
+    @AddedIn(PlatformVersion.TIRAMISU_0)
     File dumpServiceStacks();
 
     /** Check {@link android.os.Process#setProcessGroup(int, int)}. */
-    @AddedIn(majorVersion = 34)
+    @AddedIn(PlatformVersion.UPSIDE_DOWN_CAKE_0)
     void setProcessGroup(int pid, int group);
 
     /** Check {@link android.os.Process#getProcessGroup(int)}. */
-    @AddedIn(majorVersion = 34)
+    @AddedIn(PlatformVersion.UPSIDE_DOWN_CAKE_0)
     int getProcessGroup(int pid);
+
+    /** Check {@link ActivityManager#startUserInBackgroundOnSecondaryDisplay(int, int)}. */
+    @AddedIn(PlatformVersion.UPSIDE_DOWN_CAKE_0)
+    boolean startUserInBackgroundOnSecondaryDisplay(@UserIdInt int userId, int displayId);
+
+    /** Check {@link android.os.Process#setProcessProfile(int, int, String)}. */
+    @AddedIn(PlatformVersion.UPSIDE_DOWN_CAKE_0)
+    void setProcessProfile(int pid, int uid, @NonNull String profile);
 }
