@@ -19,7 +19,9 @@ import static android.car.PlatformVersion.VERSION_CODES.UPSIDE_DOWN_CAKE_0;
 
 import static com.android.car.internal.SystemConstants.ICAR_SYSTEM_SERVER_CLIENT;
 import static com.android.car.internal.common.CommonConstants.CAR_SERVICE_INTERFACE;
+import static com.android.car.internal.common.CommonConstants.INVALID_PID;
 import static com.android.car.internal.util.VersionUtils.assertPlatformVersionAtLeast;
+import static com.android.car.internal.util.VersionUtils.isPlatformVersionAtLeast;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -337,10 +339,10 @@ public final class CarServiceHelperServiceUpdatableImpl
         }
 
         @Override
-        public int getDisplayAssignedToUser(int userId) {
+        public int getMainDisplayAssignedToUser(int userId) {
             assertPlatformVersionAtLeast(UPSIDE_DOWN_CAKE_0);
 
-            return mCarServiceHelperInterface.getDisplayAssignedToUser(userId);
+            return mCarServiceHelperInterface.getMainDisplayAssignedToUser(userId);
         }
 
         @Override
@@ -363,6 +365,12 @@ public final class CarServiceHelperServiceUpdatableImpl
             assertPlatformVersionAtLeast(UPSIDE_DOWN_CAKE_0);
 
             mCarServiceHelperInterface.setProcessProfile(pid, uid, profile);
+        }
+
+        @Override
+        public int fetchAidlVhalPid() {
+            return isPlatformVersionAtLeast(UPSIDE_DOWN_CAKE_0)
+                    ? mCarServiceHelperInterface.fetchAidlVhalPid() : INVALID_PID;
         }
     }
 
