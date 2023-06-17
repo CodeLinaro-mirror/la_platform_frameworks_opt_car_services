@@ -32,6 +32,7 @@ android_test {
         "android.car.watchdoglib",
         "androidx.test.ext.junit",
         "androidx.test.rules",
+        "androidx.test.uiautomator_uiautomator",
         "mockito-target-extended-minus-junit4",
         "services.core",
         "testng",
@@ -44,5 +45,10 @@ android_test {
         "libdexmakerjvmtiagent",
         "libstaticjvmtiagent",
         "libcarservicehelperjni",
+    ],
+
+    test_suites: [
+        "general-tests",
+        "automotive-tests",
     ],
 }
