@@ -39,9 +39,9 @@ import android.util.ArrayMap;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 
-import com.android.car.internal.util.VersionUtils;
 import com.android.internal.car.CarServiceHelperInterface;
 import com.android.server.wm.CarActivityInterceptorInterface;
+import com.android.server.wm.CarDisplayCompatScaleProviderInterface;
 import com.android.server.wm.CarLaunchParamsModifierInterface;
 
 import org.junit.Before;
@@ -73,6 +73,9 @@ public final class CarServiceHelperServiceUpdatableImplTest
     @Mock
     private CarActivityInterceptorInterface mCarActivityInterceptorInterface;
     @Mock
+    private CarDisplayCompatScaleProviderInterface
+            mCarDisplayCompatScaleProviderInterface;
+    @Mock
     private ICar mICarBinder;
     @Mock
     private IBinder mIBinder;
@@ -92,17 +95,13 @@ public final class CarServiceHelperServiceUpdatableImplTest
                 mCarLaunchParamsModifierInterface);
         interfaces.put(CarActivityInterceptorInterface.class.getSimpleName(),
                 mCarActivityInterceptorInterface);
+        interfaces.put(CarDisplayCompatScaleProviderInterface.class.getSimpleName(),
+                mCarDisplayCompatScaleProviderInterface);
         interfaces.put(CarServiceProxy.class.getSimpleName(), mCarServiceProxy);
 
         mCarServiceHelperServiceUpdatableImpl = new CarServiceHelperServiceUpdatableImpl(
                 mMockContext,
                 interfaces);
-    }
-
-    @Override
-    protected void onSessionBuilder(
-            AbstractExtendedMockitoTestCase.CustomMockitoSessionBuilder builder) {
-        builder.spyStatic(VersionUtils.class);
     }
 
     @Test

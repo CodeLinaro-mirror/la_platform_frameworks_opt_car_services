@@ -15,14 +15,8 @@
  */
 package com.android.internal.car.updatable;
 
-import static android.view.Display.INVALID_DISPLAY;
-
 import static com.android.car.internal.SystemConstants.ICAR_SYSTEM_SERVER_CLIENT;
 import static com.android.car.internal.common.CommonConstants.CAR_SERVICE_INTERFACE;
-import static com.android.car.internal.common.CommonConstants.INVALID_GID;
-import static com.android.car.internal.common.CommonConstants.INVALID_PID;
-import static com.android.car.internal.common.CommonConstants.INVALID_USER_ID;
-import static com.android.car.internal.util.VersionUtils.isPlatformVersionAtLeastU;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -54,6 +48,8 @@ import com.android.internal.car.CarServiceHelperInterface;
 import com.android.internal.car.CarServiceHelperServiceUpdatable;
 import com.android.server.wm.CarActivityInterceptorInterface;
 import com.android.server.wm.CarActivityInterceptorUpdatableImpl;
+import com.android.server.wm.CarDisplayCompatScaleProviderInterface;
+import com.android.server.wm.CarDisplayCompatScaleProviderUpdatableImpl;
 import com.android.server.wm.CarLaunchParamsModifierInterface;
 import com.android.server.wm.CarLaunchParamsModifierUpdatable;
 import com.android.server.wm.CarLaunchParamsModifierUpdatableImpl;
@@ -109,6 +105,8 @@ public final class CarServiceHelperServiceUpdatableImpl
 
     private final CarLaunchParamsModifierUpdatableImpl mCarLaunchParamsModifierUpdatable;
     private final CarActivityInterceptorUpdatableImpl mCarActivityInterceptorUpdatable;
+    private final CarDisplayCompatScaleProviderUpdatableImpl
+            mCarDisplayCompatScaleProviderUpdatable;
 
     /**
      * This constructor is meant to be called using reflection by the builtin service and hence it
@@ -127,6 +125,11 @@ public final class CarServiceHelperServiceUpdatableImpl
         mCarActivityInterceptorUpdatable = new CarActivityInterceptorUpdatableImpl(
                 (CarActivityInterceptorInterface) interfaces
                         .get(CarActivityInterceptorInterface.class.getSimpleName()));
+        mCarDisplayCompatScaleProviderUpdatable =
+                new CarDisplayCompatScaleProviderUpdatableImpl(
+                    mContext,
+                    (CarDisplayCompatScaleProviderInterface) interfaces
+                        .get(CarDisplayCompatScaleProviderInterface.class.getSimpleName()));
         // carServiceProxy is Nullable because it is not possible to construct carServiceProxy with
         // "this" object in the previous constructor as CarServiceHelperServiceUpdatableImpl has
         // not been fully constructed.
@@ -193,6 +196,12 @@ public final class CarServiceHelperServiceUpdatableImpl
     @Override
     public CarActivityInterceptorUpdatableImpl getCarActivityInterceptorUpdatable() {
         return mCarActivityInterceptorUpdatable;
+    }
+
+    @Override
+    public CarDisplayCompatScaleProviderUpdatableImpl
+            getCarDisplayCompatScaleProviderUpdatable() {
+        return mCarDisplayCompatScaleProviderUpdatable;
     }
 
     @VisibleForTesting
@@ -290,7 +299,11 @@ public final class CarServiceHelperServiceUpdatableImpl
             return;
         }
 
-        mCarServiceProxy.dump(new IndentingPrintWriter(writer));
+        IndentingPrintWriter pw = new IndentingPrintWriter(writer);
+        mCarServiceProxy.dump(pw);
+        mCarLaunchParamsModifierUpdatable.dump(pw);
+        mCarActivityInterceptorUpdatable.dump(pw);
+        mCarDisplayCompatScaleProviderUpdatable.dump(pw);
     }
 
     @VisibleForTesting
@@ -336,59 +349,43 @@ public final class CarServiceHelperServiceUpdatableImpl
 
         @Override
         public void setProcessGroup(int pid, int group) {
-            if (!isPlatformVersionAtLeastU()) {
-                return;
-            }
             mCarServiceHelperInterface.setProcessGroup(pid, group);
         }
 
         @Override
         public int getProcessGroup(int pid) {
-            if (isPlatformVersionAtLeastU()) {
-                return mCarServiceHelperInterface.getProcessGroup(pid);
-            }
-            return INVALID_GID;
+            return mCarServiceHelperInterface.getProcessGroup(pid);
         }
 
         @Override
         public int getMainDisplayAssignedToUser(int userId) {
-            if (isPlatformVersionAtLeastU()) {
-                return mCarServiceHelperInterface.getMainDisplayAssignedToUser(userId);
-            }
-            return INVALID_DISPLAY;
+            return mCarServiceHelperInterface.getMainDisplayAssignedToUser(userId);
         }
 
         @Override
         public int getUserAssignedToDisplay(int displayId) {
-            if (isPlatformVersionAtLeastU()) {
-                return mCarServiceHelperInterface.getUserAssignedToDisplay(displayId);
-            }
-            return INVALID_USER_ID;
+            return mCarServiceHelperInterface.getUserAssignedToDisplay(displayId);
         }
 
         @Override
         public boolean startUserInBackgroundVisibleOnDisplay(int userId, int displayId) {
-            if (isPlatformVersionAtLeastU()) {
-                return mCarServiceHelperInterface.startUserInBackgroundVisibleOnDisplay(
-                        userId, displayId);
-            }
-            return false;
+            return mCarServiceHelperInterface.startUserInBackgroundVisibleOnDisplay(
+                    userId, displayId);
         }
 
         @Override
         public void setProcessProfile(int pid, int uid, @NonNull String profile) {
-            if (!isPlatformVersionAtLeastU()) {
-                return;
-            }
             mCarServiceHelperInterface.setProcessProfile(pid, uid, profile);
         }
 
         @Override
         public int fetchAidlVhalPid() {
-            if (isPlatformVersionAtLeastU()) {
-                return mCarServiceHelperInterface.fetchAidlVhalPid();
-            }
-            return INVALID_PID;
+            return mCarServiceHelperInterface.fetchAidlVhalPid();
+        }
+
+        @Override
+        public boolean requiresDisplayCompat(String packageName) {
+            return mCarDisplayCompatScaleProviderUpdatable.requiresDisplayCompat(packageName);
         }
     }
 
