@@ -124,6 +124,14 @@ public final class CarActivityInterceptorUpdatableImpl implements CarActivityInt
     private boolean isRootTaskUserSameAsActivityUser(IBinder rootTaskToken,
             ActivityInterceptorInfoWrapper activityInterceptorInfoWrapper) {
         TaskWrapper rootTask = TaskWrapper.createFromToken(rootTaskToken);
+        if (rootTask == null) {
+            Slogf.w(TAG, "Root task not found.");
+            return false;
+        }
+        if (rootTask.getTaskDisplayArea() == null) {
+            Slogf.w(TAG, "Root task's DisplayArea not found.");
+            return false;
+        }
         int userIdFromActivity = activityInterceptorInfoWrapper.getUserId();
         int userIdFromRootTask = mBuiltIn.getUserAssignedToDisplay(rootTask
                 .getTaskDisplayArea().getDisplay().getDisplayId());
