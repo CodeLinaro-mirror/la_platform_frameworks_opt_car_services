@@ -190,11 +190,6 @@ public final class CarServiceHelperServiceUpdatableImpl
     }
 
     @Override
-    public void initBootUser() {
-        mCarServiceProxy.initBootUser();
-    }
-
-    @Override
     public CarLaunchParamsModifierUpdatable getCarLaunchParamsModifierUpdatable() {
         return mCarLaunchParamsModifierUpdatable;
     }
@@ -208,6 +203,11 @@ public final class CarServiceHelperServiceUpdatableImpl
     public CarDisplayCompatScaleProviderUpdatableImpl
             getCarDisplayCompatScaleProviderUpdatable() {
         return mCarDisplayCompatScaleProviderUpdatable;
+    }
+
+    @Override
+    public void notifyFocusChanged(int pid, int uid) {
+        mCarServiceProxy.notifyFocusChanged(pid, uid);
     }
 
     @VisibleForTesting
