@@ -32,7 +32,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.hardware.display.DisplayManager;
-import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -53,8 +52,7 @@ import com.android.internal.car.CarServiceHelperInterface;
 import com.android.internal.car.CarServiceHelperServiceUpdatable;
 import com.android.server.wm.CarActivityInterceptorInterface;
 import com.android.server.wm.CarActivityInterceptorUpdatableImpl;
-import com.android.server.wm.CarDisplayCompatActivityInterceptor;
-import com.android.server.wm.CarDisplayCompatScaleProviderInterface;
+import com.android.server.wm.CarDisplayCompatHelperInterface;
 import com.android.server.wm.CarDisplayCompatScaleProviderUpdatableImpl;
 import com.android.server.wm.CarLaunchParamsModifierInterface;
 import com.android.server.wm.CarLaunchParamsModifierUpdatable;
@@ -157,8 +155,8 @@ public final class CarServiceHelperServiceUpdatableImpl
         mCarDisplayCompatScaleProviderUpdatable =
                 new CarDisplayCompatScaleProviderUpdatableImpl(
                     mContext,
-                    (CarDisplayCompatScaleProviderInterface) interfaces
-                            .get(CarDisplayCompatScaleProviderInterface.class.getSimpleName()));
+                    (CarDisplayCompatHelperInterface) interfaces
+                            .get(CarDisplayCompatHelperInterface.class.getSimpleName()));
         mTaskStackRepository = new CarServiceHelperTaskStackRepository();
         mCarLaunchParamsModifierUpdatable = new CarLaunchParamsModifierUpdatableImpl(
                 (CarLaunchParamsModifierInterface) interfaces.get(
@@ -168,8 +166,7 @@ public final class CarServiceHelperServiceUpdatableImpl
         mCarActivityInterceptorUpdatable.registerInterceptor(/* index = */ 0,
                 new MediaTemplateActivityInterceptorForSuspension());
         mCarActivityInterceptorUpdatable.registerInterceptor(/* index = */ 1,
-                new CarDisplayCompatActivityInterceptor(context,
-                        mCarDisplayCompatScaleProviderUpdatable));
+                mCarDisplayCompatScaleProviderUpdatable);
         // Interceptor for redirecting launch on a private display or a root task
         mCarLaunchRedirectActivityInterceptor =
                 new CarLaunchRedirectActivityInterceptor(context, mTaskStackRepository);
@@ -503,10 +500,15 @@ public final class CarServiceHelperServiceUpdatableImpl
             return mCarServiceHelperInterface.fetchAidlVhalPid();
         }
 
+        /**
+         * @deprecated use
+         * {@link com.android.internal.car.updatable.CarServiceHelperServiceUpdatableImpl.ICarServiceHelperImpl#requiresDisplayCompatForUser(String, int)}
+         * instead.
+         */
+        @Deprecated
         @Override
         public boolean requiresDisplayCompat(String packageName) {
-            return mCarDisplayCompatScaleProviderUpdatable.requiresDisplayCompat(packageName,
-                    Binder.getCallingUserHandle().getIdentifier());
+            return false;
         }
 
         @Override
