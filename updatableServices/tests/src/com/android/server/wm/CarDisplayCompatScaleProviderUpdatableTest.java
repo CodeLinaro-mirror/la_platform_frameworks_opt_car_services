@@ -18,6 +18,7 @@ package com.android.server.wm;
 
 import static android.car.feature.Flags.FLAG_DISPLAY_COMPATIBILITY;
 import static android.car.feature.Flags.FLAG_DISPLAY_COMPATIBILITY_DENSITY;
+import static android.car.feature.Flags.FLAG_DISPLAY_COMPATIBILITY_V2;
 import static android.content.ContentResolver.NOTIFY_INSERT;
 import static android.content.pm.ApplicationInfo.FLAG_SYSTEM;
 import static android.content.pm.FeatureInfo.FLAG_REQUIRED;
@@ -42,7 +43,9 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -91,7 +94,8 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 
-@RequiresFlagsEnabled({FLAG_DISPLAY_COMPATIBILITY, FLAG_DISPLAY_COMPATIBILITY_DENSITY})
+@RequiresFlagsEnabled({FLAG_DISPLAY_COMPATIBILITY, FLAG_DISPLAY_COMPATIBILITY_DENSITY,
+        FLAG_DISPLAY_COMPATIBILITY_V2})
 @RunWith(AndroidJUnit4.class)
 public class CarDisplayCompatScaleProviderUpdatableTest {
 
@@ -841,5 +845,168 @@ public class CarDisplayCompatScaleProviderUpdatableTest {
 
         assertThat(mPackageToDisplayIdMap.get(appUid, /* valueIfKeyNotFound= */ INVALID_DISPLAY))
                 .isEqualTo(DEFAULT_DISPLAY);
+    }
+
+    @Test
+    public void getDensityScaleFactor_returnsSetValue() {
+        String packageName = "com.test.package";
+        float expectedScale = 0.85f;
+        mConfig.setScaleFactor(
+                new CarDisplayCompatConfig.Key(DEFAULT_DISPLAY, packageName, CURRENT_USER),
+                expectedScale);
+
+        float actualScale = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY);
+
+        assertThat(actualScale).isEqualTo(expectedScale);
+    }
+
+    @Test
+    public void getDensityScaleFactor_noConfig_returnsDefaultScale() {
+        String packageName = "com.test.package.noconfig";
+
+        float actualScale = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY);
+
+        assertThat(actualScale).isEqualTo(DEFAULT_SCALE);
+    }
+
+    @Test
+    public void getDensityScaleFactor_compatModeEnabled_returnsDefaultScale() {
+        String packageName = "com.test.package";
+        mConfig.setScaleFactor(
+                new CarDisplayCompatConfig.Key(DEFAULT_DISPLAY, packageName, CURRENT_USER),
+                0.85f);
+        when(mInterface.getCompatModeScalingFactor(eq(packageName), any(UserHandle.class)))
+                .thenReturn(0.9f);
+
+        float actualScale = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY);
+
+        assertThat(actualScale).isEqualTo(DEFAULT_SCALE);
+    }
+
+    @Test
+    public void getDensityScaleFactor_differentUser_returnsDefaultScale() {
+        String packageName = "com.test.package";
+        mConfig.setScaleFactor(
+                new CarDisplayCompatConfig.Key(DEFAULT_DISPLAY, packageName, CURRENT_USER),
+                0.85f);
+
+        float scaleForAnotherUser = mImpl.getDensityScaleFactor(packageName, ANOTHER_USER,
+                DEFAULT_DISPLAY);
+
+        assertThat(scaleForAnotherUser).isEqualTo(DEFAULT_SCALE);
+    }
+
+    @Test
+    public void getDensityScaleFactor_differentDisplay_returnsDefaultScale() {
+        String packageName = "com.test.package";
+        int display2 = 2;
+        mConfig.setScaleFactor(
+                new CarDisplayCompatConfig.Key(DEFAULT_DISPLAY, packageName, CURRENT_USER),
+                0.85f);
+
+        float scaleForDisplay2 = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, display2);
+
+        assertThat(scaleForDisplay2).isEqualTo(DEFAULT_SCALE);
+    }
+
+    @Test
+    public void setDensityScaleFactor_setsNewValueCorrectly() {
+        String packageName = "com.test.package";
+        float newScale = 0.75f;
+
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, newScale);
+        float actualScale = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY);
+
+        assertThat(actualScale).isEqualTo(newScale);
+    }
+
+    @Test
+    public void setDensityScaleFactor_updatesExistingValue() {
+        String packageName = "com.test.package";
+        float initialScale = 0.8f;
+        float updatedScale = 0.9f;
+
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, initialScale);
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, updatedScale);
+        float actualScale = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY);
+
+        assertThat(actualScale).isEqualTo(updatedScale);
+    }
+
+    @Test
+    public void setDensityScaleFactor_valueIsScopedToUser() {
+        String packageName = "com.test.package";
+        float expectedScaleForCurrentUser = 0.85f;
+        float expectedScaleForAnotherUser = 0.95f;
+
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY,
+                expectedScaleForCurrentUser);
+        mImpl.setDensityScaleFactor(packageName, ANOTHER_USER, DEFAULT_DISPLAY,
+                expectedScaleForAnotherUser);
+
+        float actualScaleForCurrentUser = mImpl.getDensityScaleFactor(packageName, CURRENT_USER,
+                DEFAULT_DISPLAY);
+        float actualScaleForAnotherUser = mImpl.getDensityScaleFactor(packageName, ANOTHER_USER,
+                DEFAULT_DISPLAY);
+
+        assertThat(actualScaleForCurrentUser).isEqualTo(expectedScaleForCurrentUser);
+        assertThat(actualScaleForAnotherUser).isEqualTo(expectedScaleForAnotherUser);
+    }
+
+    @Test
+    public void setDensityScaleFactor_valueIsScopedToDisplay() {
+        String packageName = "com.test.package";
+        int display2 = 2;
+        float expectedScaleForDefaultDisplay = 0.85f;
+        float expectedScaleForDisplay2 = 0.95f;
+
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY,
+                expectedScaleForDefaultDisplay);
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, display2, expectedScaleForDisplay2);
+
+        float actualScaleForDefaultDisplay = mImpl.getDensityScaleFactor(packageName, CURRENT_USER,
+                DEFAULT_DISPLAY);
+        float actualScaleForDisplay2 = mImpl.getDensityScaleFactor(packageName, CURRENT_USER,
+                display2);
+
+        assertThat(actualScaleForDefaultDisplay).isEqualTo(expectedScaleForDefaultDisplay);
+        assertThat(actualScaleForDisplay2).isEqualTo(expectedScaleForDisplay2);
+    }
+
+    @Test
+    public void setDensityScaleFactor_setNoScale_getReturnsDefaultScale() {
+        String packageName = "com.test.package";
+
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY,
+                0.85f); // set a value first
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, NO_SCALE);
+        float actualScale = mImpl.getDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY);
+
+        assertThat(actualScale).isEqualTo(DEFAULT_SCALE);
+    }
+
+    @Test
+    public void setDensityScaleFactor_updatesSettingsSecure_whenConfigChanges() {
+        String packageName = "com.test.package";
+        float newScale = 0.75f;
+
+        clearInvocations(mInterface);
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, newScale);
+
+        verify(mInterface).putStringForUser(eq(mContentResolver),
+                eq(DISPLAYCOMPAT_SETTINGS_SECURE_KEY), any(String.class), eq(CURRENT_USER));
+    }
+
+    @Test
+    public void setDensityScaleFactor_doesNotUpdateSettingsSecure_whenConfigIsSame() {
+        String packageName = "com.test.package";
+        float scale = 0.75f;
+
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, scale);
+        clearInvocations(mInterface);
+        mImpl.setDensityScaleFactor(packageName, CURRENT_USER, DEFAULT_DISPLAY, scale);
+
+        // Should NOT trigger a call to putStringForUser since the value is not updated
+        verify(mInterface, never()).putStringForUser(any(), any(), any(), anyInt());
     }
 }
